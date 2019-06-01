@@ -102,6 +102,51 @@ impl NalHandler for NalCapture {
     }
 }
 
+#[derive(Default)]
+struct PicTimingDump;
+impl nal::sei::pic_timing::PicTimingHandler for PicTimingDump {
+    type Ctx = IngestH264Context;
+
+    fn handle(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>, pic_timing: nal::sei::pic_timing::PicTiming) {
+        //println!("{:#?}", pic_timing);
+    }
+}
+h264_reader::sei_switch!{
+    SeiSwitch<IngestH264Context> {
+        //BufferingPeriod: h264_reader::nal::sei::buffering_period::BufferingPeriodPayloadReader
+        //    => h264_reader::nal::sei::buffering_period::BufferingPeriodPayloadReader::new(),
+        //UserDataRegisteredItuTT35: h264_reader::nal::sei::user_data_registered_itu_t_t35::UserDataRegisteredItuTT35Reader<TT35Switch>
+        //    => h264_reader::nal::sei::user_data_registered_itu_t_t35::UserDataRegisteredItuTT35Reader::new(TT35Switch::default()),
+        PicTiming: h264_reader::nal::sei::pic_timing::PicTimingReader<PicTimingDump>
+            => h264_reader::nal::sei::pic_timing::PicTimingReader::new(PicTimingDump::default()),
+    }
+}
+struct IngestSeiPayoadReader {
+    switch: SeiSwitch,
+}
+impl h264_reader::nal::sei::SeiIncrementalPayloadReader for IngestSeiPayoadReader {
+    type Ctx = IngestH264Context;
+
+    fn start(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>, payload_type: h264_reader::nal::sei::HeaderType, payload_size: u32) {
+        //println!("  SEI: {:?} size={}", payload_type, payload_size);
+        self.switch.start(ctx, payload_type, payload_size)
+    }
+
+    fn push(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>, buf: &[u8]) {
+        self.switch.push(ctx, buf)
+    }
+
+    fn end(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>) {
+        self.switch.end(ctx)
+    }
+
+    fn reset(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>) {
+        self.switch.reset(ctx)
+    }
+}
+
+
+
 struct IngestH264Context {
     store: store::Store,
     track_id: Option<store::TrackId>,
@@ -256,10 +301,12 @@ impl H264ElementaryStreamConsumer {
             }
         }
         let mut switch = h264_reader::nal::NalSwitch::new();
+        let sei_handler = h264_reader::nal::sei::SeiNalHandler::new(IngestSeiPayoadReader { switch: SeiSwitch::default() });
         let sps_handler = SpsIngestNalHandler::default();
         let pps_handler = PpsIngestNalHandler::default();
         let slice_wout_part_idr_handler = SliceIngest::new(SliceType::Idr);
         let slice_wout_part_nonidr_handler = SliceIngest::new(SliceType::NonIdr);
+        switch.put_handler(h264_reader::nal::UnitType::SEI, Box::new(RefCell::new(sei_handler)));
         switch.put_handler(h264_reader::nal::UnitType::SeqParameterSet, Box::new(RefCell::new(sps_handler)));
         switch.put_handler(h264_reader::nal::UnitType::PicParameterSet, Box::new(RefCell::new(pps_handler)));
         switch.put_handler(h264_reader::nal::UnitType::SliceLayerWithoutPartitioningIdr, Box::new(RefCell::new(slice_wout_part_idr_handler)));
