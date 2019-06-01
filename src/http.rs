@@ -92,7 +92,7 @@ impl HlsService {
                     //  - FRAMERATE
                     let (width, height) = avc_track.dimensions();
                     writeln!(text,
-                             "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION=\"{}x{}\"",
+                             "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{}",
                              avc_track.bandwidth(),
                              //avc_track.rfc6381_codec(),
                              width,
