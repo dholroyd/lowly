@@ -3,11 +3,11 @@ use futures::future::Future;
 use hyper::service::Service;
 use crate::store;
 use futures::future;
-use std::{error, fmt, cmp};
+use std::{error, fmt};
 use std::fmt::Display;
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
-use mse_fmp4::fmp4;
+use mse_fmp4::{fmp4, aac};
 use mse_fmp4::io::WriteTo;
 use mse_fmp4::fmp4::common::Mp4Box;
 use mpeg2ts_reader::pes::Timestamp;
@@ -92,13 +92,25 @@ impl HlsService {
                     //  - FRAMERATE
                     let (width, height) = avc_track.dimensions();
                     writeln!(text,
-                             "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{}",
+                             "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{},AUDIO=\"default-audio-group\"",
                              avc_track.bandwidth(),
                              //avc_track.rfc6381_codec(),
                              width,
                              height)
                         .unwrap();
                     writeln!(text, "track/{}/media.m3u8", track.track_id.0).unwrap();
+                },
+                store::Track::Aac(aac_track) => {
+                    write!(text,
+                             "#EXT-X-MEDIA:TYPE=AUDIO,URI=\"track/{}/media.m3u8\",GROUP-ID=\"default-audio-group\",LANGUAGE=\"es\",NAME=\"stream_9\",AUTOSELECT=YES",
+                             track.track_id.0,
+                    )
+                    .unwrap();
+                    if let Some(channels) = aac_track.channels() {
+                        write!(text, ",CHANNELS=\"{}\"", channels)
+                        .unwrap();
+                    }
+                    writeln!(text).unwrap();
                 }
             }
         }
@@ -179,6 +191,7 @@ impl HlsService {
         writeln!(text, "#EXTM3U").unwrap();
         // TODO: validate correct version vs. used HSL features
         writeln!(text, "#EXT-X-VERSION:{}", 6).unwrap();
+        writeln!(text, "#EXT-X-INDEPENDENT-SEGMENTS").unwrap();
         let mut track_ref = track_ref;
         match track_ref.track() {
             store::Track::Avc(ref avc_track) => {
@@ -191,6 +204,23 @@ impl HlsService {
                     .unwrap();
                 // TODO: EXT-X-MEDIA-SEQUENCE
                 for seg in avc_track.segments() {
+                    if !seg.is_continuous() {
+                        writeln!(text, "#EXT-X-DISCONTINUITY").unwrap();
+                    }
+                    writeln!(text, "#EXTINF:{:.3},{}", seg.duration_seconds(), "").unwrap();
+                    writeln!(text, "segment/{}/seg.mp4", seg.id()).unwrap();
+                }
+            },
+            store::Track::Aac(ref aac_track) => {
+                writeln!(text,
+                         "#EXT-X-TARGETDURATION:{}",
+                         aac_track.max_chunk_duration())
+                    .unwrap();
+                writeln!(text,
+                         "#EXT-X-MAP:URI=\"init.mp4\"")
+                    .unwrap();
+                // TODO: EXT-X-MEDIA-SEQUENCE
+                for seg in aac_track.segments() {
                     if !seg.is_continuous() {
                         writeln!(text, "#EXT-X-DISCONTINUITY").unwrap();
                     }
@@ -212,7 +242,10 @@ impl HlsService {
         let init = match track_ref.track() {
             store::Track::Avc(ref avc_track) => {
                 Self::make_avc_initialisation_segment(avc_track)
-            }
+            },
+            store::Track::Aac(ref avc_track) => {
+                Self::make_aac_initialisation_segment(avc_track)
+            },
         };
         let init = match init {
             Ok(init) => init,
@@ -243,7 +276,7 @@ impl HlsService {
         let mut track = fmp4::TrackBox::new(true);
         track.tkhd_box.width = width << 16;
         track.tkhd_box.height = height << 16;
-        track.tkhd_box.duration = std::u32::MAX;
+        track.tkhd_box.duration = 0;
         //track.edts_box.elst_box.media_time = avc_track.segments().next().unwrap().id() as i32;
         track.mdia_box.mdhd_box.timescale = 90000;
         track.mdia_box.mdhd_box.duration = 0;
@@ -286,6 +319,50 @@ impl HlsService {
         Ok(segment)
     }
 
+    fn make_aac_initialisation_segment(aac_track: &store::AacTrack) -> Result<fmp4::InitializationSegment, mse_fmp4::Error> {
+        let mut segment = fmp4::InitializationSegment::default();
+
+        let mut track = fmp4::TrackBox::new(false);
+        track.tkhd_box.duration = 0;
+        track.mdia_box.mdhd_box.timescale = 90000;
+        track.mdia_box.mdhd_box.duration = 0;
+
+        let profile = match aac_track.profile() {
+            adts_reader::AudioObjectType::AacMain => aac::AacProfile::Main,
+            adts_reader::AudioObjectType::AacLC => aac::AacProfile::Lc,
+            adts_reader::AudioObjectType::AacSSR => aac::AacProfile::Ssr,
+            adts_reader::AudioObjectType::AacLTP => aac::AacProfile::Ltp,
+        };
+        let frequency = aac::SamplingFrequency::from_index(aac_track.frequency() as u8).unwrap();
+        let channel_configuration = aac::ChannelConfiguration::from_u8(aac_track.channel_config() as u8).unwrap();
+
+
+        let aac_sample_entry = fmp4::AacSampleEntry {
+            esds_box: fmp4::Mpeg4EsDescriptorBox {
+                profile,
+                frequency,
+                channel_configuration,
+            },
+        };
+        track
+            .mdia_box
+            .minf_box
+            .stbl_box
+            .stsd_box
+            .sample_entries
+            .push(fmp4::SampleEntry::Aac(aac_sample_entry));
+        segment.moov_box.trak_boxes.push(track);
+        segment.moov_box.mvhd_box.timescale = 1;
+        segment.moov_box.mvhd_box.duration = 0;
+        segment
+            .moov_box
+            .mvex_box
+            .trex_boxes
+            .push(fmp4::TrackExtendsBox::new(false));
+
+        Ok(segment)
+    }
+
     fn track_html(req: Request<Body>, track_ref: store::TrackRef) -> Response<Body> {
         let mut text = String::new();
         text.write_str("<html><body>\n").unwrap();
@@ -294,6 +371,7 @@ impl HlsService {
         let mut track_ref = track_ref;
         match track_ref.track() {
             store::Track::Avc(ref avc_track) => Self::avc_track_html(req, &mut text, avc_track),
+            store::Track::Aac(ref aac_track) => Self::aac_track_html(req, &mut text, aac_track),
         }
 
         text.write_str("</body></html>\n").unwrap();
@@ -322,6 +400,23 @@ impl HlsService {
         writeln!(text, "</ul>").unwrap();
     }
 
+    fn aac_track_html(req: Request<Body>, text: &mut String, track: &store::AacTrack) {
+
+        writeln!(text, "<h2>Profile</h2>").unwrap();
+        writeln!(text, "<pre>{:?}</pre>", track.profile()).unwrap();
+        writeln!(text, "<h2>Channel configuration</h2>").unwrap();
+        writeln!(text, "<pre>{:?}</pre>", track.channel_config()).unwrap();
+        writeln!(text, "<h2>Sampling Frequency</h2>").unwrap();
+        writeln!(text, "<pre>{:?}</pre>", track.frequency()).unwrap();
+
+        writeln!(text, "<h2>Samples</h2>").unwrap();
+        writeln!(text, "<ul>").unwrap();
+        for sample in track.samples() {
+            writeln!(text, "<li><a href=\"sample/{dts}/sample.html\">dts={dts}</a> pts={pts}</li>", dts = sample.dts, pts = sample.pts).unwrap();
+        }
+        writeln!(text, "</ul>").unwrap();
+    }
+
     fn sample_html(req: Request<Body>, track_ref: store::TrackRef, sample_id: String, rest: Option<String>) -> Response<Body> {
         let sample_dts = if let Ok(dts) = sample_id.parse() {
             dts
@@ -340,7 +435,17 @@ impl HlsService {
         match track_ref.track() {
             store::Track::Avc(ref avc_track) => {
                 if let Some(sample) = avc_track.sample(sample_dts) {
-                    Self::avc_sample_html(req, &mut text, sample)
+                    Self::sample_detail_html(req, &mut text, sample)
+                } else {
+                    return Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Body::from("No such sample"))
+                        .unwrap()
+                }
+            },
+            store::Track::Aac(ref aac_track) => {
+                if let Some(sample) = aac_track.sample(sample_dts) {
+                    Self::sample_detail_html(req, &mut text, sample)
                 } else {
                     return Response::builder()
                         .status(StatusCode::NOT_FOUND)
@@ -357,18 +462,21 @@ impl HlsService {
             .unwrap()
     }
 
-    fn avc_sample_html(req: Request<Body>, text: &mut String, sample: &store::Sample) {
+    fn sample_detail_html(req: Request<Body>, text: &mut String, sample: &store::Sample) {
         writeln!(text, "<dl>").unwrap();
         writeln!(text, "<dt>Size</dt><dd>{} bytes</dd>", sample.data.len()).unwrap();
         writeln!(text, "<dt>DTS</dt><dd>{} ticks</dd>", sample.dts).unwrap();
         writeln!(text, "<dt>PTS</dt><dd>{} ticks</dd>", sample.pts).unwrap();
         writeln!(text, "</dl>").unwrap();
 
-        writeln!(text, "<h2>Slice Header</h2>").unwrap();
         match sample.header {
             store::SampleHeader::Avc(ref nal_header, ref slice_header) => {
+                writeln!(text, "<h2>Slice Header</h2>").unwrap();
                 writeln!(text, "<pre>{:#?}</pre>", nal_header).unwrap();
                 writeln!(text, "<pre>{:#?}</pre>", slice_header).unwrap();
+            }
+            store::SampleHeader::Aac => {
+                // nothing yet
             }
         }
     }
@@ -389,7 +497,10 @@ impl HlsService {
                 store::Track::Avc(ref avc_track) => {
                     Self::make_avc_segment(avc_track, segment_dts)
                     //Self::make_avc_segment_ffmpeg(avc_track, segment_dts)
-                }
+                },
+                store::Track::Aac(ref aac_track) => {
+                    Self::make_aac_segment(aac_track, segment_dts)
+                },
             };
 
             let segment = match segment {
@@ -430,7 +541,7 @@ impl HlsService {
     }
 */
     fn make_avc_segment(avc_track: &store::AvcTrack, dts: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
-        let avc_stream = Self::create_avc_stream(avc_track, dts);
+        let avc_stream = Self::create_avc_stream(avc_track, dts).unwrap(); // TODO
 
         let mut segment = fmp4::MediaSegment::default();
         if let Some(seq) = avc_track.segment_number_for(dts) {
@@ -475,7 +586,7 @@ impl HlsService {
     }
 
     // reformat the data into the form accepted by the mse_fmp4 crate
-    fn create_avc_stream(avc_track: &store::AvcTrack, dts: u64) -> AvcStream {
+    fn create_avc_stream(avc_track: &store::AvcTrack, dts: u64) -> Result<AvcStream, store::SegmentError> {
         let mut avc_stream = AvcStream {
             samples: vec![],
             data: vec![]
@@ -483,7 +594,7 @@ impl HlsService {
         let mut avc_timestamps = Vec::new();
         let mut avc_timestamp_offset = 0;
 
-        for sample in avc_track.segment_samples(dts) {
+        for sample in avc_track.segment_samples(dts)? {
             let i = avc_timestamps.len();
             let mut timestamp = sample.pts;
             if i == 0 {
@@ -522,7 +633,71 @@ impl HlsService {
             avc_stream.samples[0].duration = Some(3600);
         }
 
-        avc_stream
+        Ok(avc_stream)
+    }
+
+    fn make_aac_segment(aac_track: &store::AacTrack, dts: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
+        let aac_stream = Self::create_aac_stream(aac_track, dts);
+
+        let mut segment = fmp4::MediaSegment::default();
+        if let Some(seq) = aac_track.segment_number_for(dts) {
+            segment.moof_box.mfhd_box.sequence_number = seq as u32;
+        }
+
+        let mut traf = fmp4::TrackFragmentBox::new(false);
+        traf.tfdt_box.base_media_decode_time = dts as u32;
+        traf.tfhd_box.default_sample_duration = Some(aac::SAMPLES_IN_FRAME as u32);
+        traf.trun_box.data_offset = Some(0); // dummy
+        traf.trun_box.samples = aac_stream.samples;
+        segment.moof_box.traf_boxes.push(traf);
+
+        // mdat and offsets adjustment
+        let mut counter = mse_fmp4::io::ByteCounter::with_sink();
+        segment.moof_box.write_box(&mut counter)?;
+        segment.moof_box.traf_boxes[0].trun_box.data_offset = Some(counter.count() as i32 + 8);
+
+        segment.mdat_boxes.push(fmp4::MediaDataBox {
+            data: aac_stream.data,
+        });
+
+        Ok(segment)
+    }
+
+    fn create_aac_stream(avc_track: &store::AacTrack, dts: u64) -> AacStream {
+        let mut aac_stream = AacStream {
+            samples: vec![],
+            data: vec![]
+        };
+        let mut aac_timestamps = Vec::new();
+        let mut aac_timestamp_offset = 0;
+
+        for sample in avc_track.segment_samples(dts) {
+            let i = aac_timestamps.len();
+            let mut timestamp = sample.pts;
+            if i == 0 {
+                aac_timestamp_offset = timestamp;
+            }
+            if timestamp < aac_timestamp_offset {
+                // TODO: this code for handling TS wrap is from mse_fmp4; maybe an underlying Timestamp type could handle this directly
+                timestamp += Timestamp::MAX.value();
+            }
+            aac_timestamps.push((timestamp - aac_timestamp_offset, i));
+
+            let prev_data_len = aac_stream.data.len();
+            aac_stream.data.write_all(&sample.data[..]).unwrap();
+
+            let sample_size = (aac_stream.data.len() - prev_data_len) as u32;
+            let sample_composition_time_offset = (sample.pts as i64 - sample.dts as i64) as i32;
+            aac_stream.samples.push(fmp4::Sample {
+                // TODO: calculate durations in some better manner!
+                duration: Some(1920),
+                size: Some(sample_size),
+                flags: None,
+                composition_time_offset: Some(sample_composition_time_offset),
+            });
+        }
+
+        aac_stream
     }
 }
 impl futures::IntoFuture for HlsService {
@@ -569,6 +744,28 @@ struct AvcStream {
     data: Vec<u8>,
 }
 impl AvcStream {
+    fn duration(&self) -> Result<u32, mse_fmp4::Error> {
+        let mut duration: u32 = 0;
+        for sample in &self.samples {
+            let sample_duration = sample.duration.ok_or(mse_fmp4::ErrorKind::InvalidInput)?;
+            duration = duration.checked_add(sample_duration).ok_or(mse_fmp4::ErrorKind::InvalidInput)?;
+        }
+        Ok(duration)
+    }
+    fn start_time(&self) -> i32 {
+        self.samples
+            .first()
+            .and_then(|s| s.composition_time_offset)
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Debug)]
+struct AacStream {
+    samples: Vec<fmp4::Sample>,
+    data: Vec<u8>,
+}
+impl AacStream {
     fn duration(&self) -> Result<u32, mse_fmp4::Error> {
         let mut duration: u32 = 0;
         for sample in &self.samples {

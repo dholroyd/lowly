@@ -8,6 +8,7 @@ use mpeg2ts_reader::{
 use crate::store;
 
 mod h264;
+mod adts;
 
 mpeg2ts_reader::packet_filter_switch! {
     IngestFilterSwitch<IngestDemuxContext> {
@@ -15,7 +16,7 @@ mpeg2ts_reader::packet_filter_switch! {
         Pmt: demultiplex::PmtPacketFilter<IngestDemuxContext, IngestPmtProcessor>,
         Null: demultiplex::NullPacketFilter<IngestDemuxContext>,
         H264: pes::PesPacketFilter<IngestDemuxContext, h264::H264ElementaryStreamConsumer>,
-        //Adts: pes::PesPacketFilter<IngestDemuxContext,AdtsElementaryStreamConsumer>,
+        Adts: pes::PesPacketFilter<IngestDemuxContext, adts::AdtsElementaryStreamConsumer>,
     }
 }
 pub struct IngestDemuxContext {
@@ -64,8 +65,13 @@ impl demultiplex::DemuxContext for IngestDemuxContext {
                 program_pid, stream_type: StreamType::H264, pmt, stream_info,
             } => IngestFilterSwitch::H264(h264::H264ElementaryStreamConsumer::construct(stream_info, self.store.clone())),
 
+            demultiplex::FilterRequest::ByStream {
+                program_pid, stream_type: StreamType::Adts, pmt, stream_info,
+            } => IngestFilterSwitch::Adts(adts::AdtsElementaryStreamConsumer::construct(stream_info, self.store.clone())),
+
             demultiplex::FilterRequest::ByStream { .. } => {
-                // ignore any other elementry stream-types not handled above,
+                eprintln!("Ignoring {:?}", req);
+                // ignore any other elementary stream-types not handled above,
                 IngestFilterSwitch::Null(demultiplex::NullPacketFilter::default())
             }
 

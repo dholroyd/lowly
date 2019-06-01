@@ -52,7 +52,7 @@ impl h264_reader::nal::NalHandler for SliceIngest {
 
     fn end(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>) {
         let current_slice = self.current_slice.take().unwrap();
-        let mut capture = NalCapture::default();
+        let capture = NalCapture::default();
         let mut decode = RbspDecoder::new(capture);
         decode.start(ctx, current_slice.header);
         decode.push(ctx, &current_slice.buf[..]);
@@ -191,7 +191,7 @@ impl NalHandler for SpsIngestNalHandler {
     }
 
     fn end(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>) {
-        let mut capture = NalCapture::default();
+        let capture = NalCapture::default();
         let mut decode = RbspDecoder::new(capture);
         decode.start(ctx, self.header.unwrap());
         decode.push(ctx, &self.buf[1..]);
@@ -226,7 +226,7 @@ impl NalHandler for PpsIngestNalHandler {
     }
 
     fn end(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>) {
-        let mut capture = NalCapture::default();
+        let capture = NalCapture::default();
         let mut decode = RbspDecoder::new(capture);
         decode.start(ctx, self.header.unwrap());
         decode.push(ctx, &self.buf[1..]);
@@ -251,7 +251,7 @@ impl H264ElementaryStreamConsumer {
         let ctx = IngestH264Context::new(store);
         for desc in stream_info.descriptors::<descriptor::CoreDescriptors>() {
             match desc {
-                Ok(d) => println!("  {:?}", d),
+                Ok(d) => println!("  H264 {:?}: {:?}", stream_info.elementary_pid(), d),
                 Err(e) => println!("  Error reading descriptor: {:?}", e),
             }
         }
@@ -274,7 +274,9 @@ impl H264ElementaryStreamConsumer {
     }
 }
 impl pes::ElementaryStreamConsumer for H264ElementaryStreamConsumer {
-    fn start_stream(&mut self) { println!("H264 start_steam()"); }
+    fn start_stream(&mut self) {
+        println!("H264 start_steam()");
+    }
     fn begin_packet(&mut self, header: pes::PesHeader) {
         match header.contents() {
             pes::PesContents::Parsed(Some(parsed)) => {
@@ -286,9 +288,9 @@ impl pes::ElementaryStreamConsumer for H264ElementaryStreamConsumer {
                 }
                 if parsed.data_alignment_indicator() ==pes::DataAlignment::Aligned {
                     self.parser.start(&mut self.ctx);
+                } else {
+                    self.parser.start(&mut self.ctx);
                 }
-                //println!("H264 {:?} pes_packet_length={:?}", self.pid, header.pes_packet_length());
-                self.parser.start(&mut self.ctx);
                 self.parser.push(&mut self.ctx, parsed.payload());
             },
             pes::PesContents::Parsed(None) => println!("H264: Parsed(None)"),
@@ -300,11 +302,9 @@ impl pes::ElementaryStreamConsumer for H264ElementaryStreamConsumer {
         }
     }
     fn continue_packet(&mut self, data: &[u8]) {
-        //println!("H264 {:?} continue {}", self.pid, self.count);
         self.parser.push(&mut self.ctx, data);
     }
     fn end_packet(&mut self) {
-        //println!("H264 {:?} end", self.pid);
         // TODO: at some point I had missed out this call to end_units() and the resulting problem
         // was hard to debug -- can the API be changed to make that kind of error either less
         // likely, or the failures easier to understand?
