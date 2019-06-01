@@ -13,7 +13,7 @@ mod adts;
 mpeg2ts_reader::packet_filter_switch! {
     IngestFilterSwitch<IngestDemuxContext> {
         Pat: demultiplex::PatPacketFilter<IngestDemuxContext>,
-        Pmt: demultiplex::PmtPacketFilter<IngestDemuxContext, IngestPmtProcessor>,
+        Pmt: demultiplex::PmtPacketFilter<IngestDemuxContext, demultiplex::DemuxPmtProcessor<IngestDemuxContext>>,
         Null: demultiplex::NullPacketFilter<IngestDemuxContext>,
         H264: pes::PesPacketFilter<IngestDemuxContext, h264::H264ElementaryStreamConsumer>,
         Adts: pes::PesPacketFilter<IngestDemuxContext, adts::AdtsElementaryStreamConsumer>,
@@ -30,17 +30,13 @@ impl IngestDemuxContext {
             changeset: Default::default(),
         }
     }
-    fn construct_pmt(&self, pid: packet::Pid, program_number: u16) -> demultiplex::PmtPacketFilter<IngestDemuxContext, IngestPmtProcessor> {
+    fn construct_pmt(&self, pid: packet::Pid, program_number: u16) -> demultiplex::PmtPacketFilter<IngestDemuxContext, demultiplex::DemuxPmtProcessor<IngestDemuxContext>> {
         demultiplex::PmtPacketFilter::new(
             pid,
             program_number,
-            IngestPmtProcessor::new(
+            demultiplex::DemuxPmtProcessor::new(
                 pid,
-                program_number,
-                demultiplex::DemuxPmtProcessor::new(
-                    pid,
-                    program_number
-                )
+                program_number
             )
         )
     }
@@ -82,26 +78,6 @@ impl demultiplex::DemuxContext for IngestDemuxContext {
                 IngestFilterSwitch::Null(demultiplex::NullPacketFilter::default())
             }
         }
-    }
-}
-
-pub struct IngestPmtProcessor {
-    pid: packet::Pid,
-    program_number: u16,
-    proc: demultiplex::DemuxPmtProcessor<IngestDemuxContext>,
-}
-impl IngestPmtProcessor {
-    fn new(pid: packet::Pid, program_number: u16, proc: demultiplex::DemuxPmtProcessor<IngestDemuxContext>) -> IngestPmtProcessor {
-        IngestPmtProcessor {
-            pid,
-            program_number,
-            proc,
-        }
-    }
-}
-impl demultiplex::PmtProcessor<IngestDemuxContext> for IngestPmtProcessor {
-    fn new_table(&mut self, ctx: &mut IngestDemuxContext, header: &psi::SectionCommonHeader, table_syntax_header: &psi::TableSyntaxHeader, sect: &psi::pmt::PmtSection) {
-        self.proc.new_table(ctx, header, table_syntax_header, sect)
     }
 }
 
