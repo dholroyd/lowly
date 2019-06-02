@@ -13,7 +13,7 @@ mod adts;
 mpeg2ts_reader::packet_filter_switch! {
     IngestFilterSwitch<IngestDemuxContext> {
         Pat: demultiplex::PatPacketFilter<IngestDemuxContext>,
-        Pmt: demultiplex::PmtPacketFilter<IngestDemuxContext, demultiplex::DemuxPmtProcessor<IngestDemuxContext>>,
+        Pmt: demultiplex::PmtPacketFilter<IngestDemuxContext>,
         Null: demultiplex::NullPacketFilter<IngestDemuxContext>,
         H264: pes::PesPacketFilter<IngestDemuxContext, h264::H264ElementaryStreamConsumer>,
         Adts: pes::PesPacketFilter<IngestDemuxContext, adts::AdtsElementaryStreamConsumer>,
@@ -30,14 +30,10 @@ impl IngestDemuxContext {
             changeset: Default::default(),
         }
     }
-    fn construct_pmt(&self, pid: packet::Pid, program_number: u16) -> demultiplex::PmtPacketFilter<IngestDemuxContext, demultiplex::DemuxPmtProcessor<IngestDemuxContext>> {
+    fn construct_pmt(&self, pid: packet::Pid, program_number: u16) -> demultiplex::PmtPacketFilter<IngestDemuxContext> {
         demultiplex::PmtPacketFilter::new(
             pid,
             program_number,
-            demultiplex::DemuxPmtProcessor::new(
-                pid,
-                program_number
-            )
         )
     }
 }
