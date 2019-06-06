@@ -369,6 +369,7 @@ dependencies = [
  "h264-reader 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "hexdump 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "hyper 0.12.29 (registry+https://github.com/rust-lang/crates.io-index)",
+ "itertools 0.4.19 (registry+https://github.com/rust-lang/crates.io-index)",
  "mpeg2ts-reader 0.12.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "mse_fmp4 0.1.2 (git+https://github.com/dholroyd/mse_fmp4.git)",
  "rtp-rs 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",

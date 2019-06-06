@@ -2,7 +2,6 @@ use mpeg2ts_reader::{
     StreamType,
     demultiplex,
     packet,
-    psi,
     pes,
 };
 use crate::store;

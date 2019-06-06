@@ -4,6 +4,9 @@ use h264_reader::nal;
 use std::collections::vec_deque;
 use std::iter::Peekable;
 use h264_reader::nal::UnitType;
+use itertools::Itertools;
+
+pub const SEG_DURATION_PTS: u64 = 172800;
 
 pub struct Sample {
     pub data: Vec<u8>,
@@ -19,7 +22,12 @@ pub enum SampleHeader {
 
 #[derive(Debug)]
 pub enum SegmentError {
-    BadSampleTime(u64)
+    BadSampleTime(u64),
+    /// Tried to inspect segment information, but no segments exist within the track (yet)
+    NoSegments,
+    /// Tried to inspect the parts for a segment, but the segment does not have any parts (hls
+    /// says only the very most recent segments should present parts)
+    NoPartsForSegment,
 }
 
 pub struct AvcTrack {
@@ -94,7 +102,7 @@ impl AvcTrack {
 
     pub fn bandwidth(&self) -> u32 {
         // TODO: measure max bandwidth per GOP, and report here
-        112000
+        250000
     }
 
     pub fn rfc6381_codec(&self) -> String {
@@ -108,8 +116,59 @@ impl AvcTrack {
         2
     }
     pub fn segments<'track>(&'track self) -> impl Iterator<Item = SegmentInfo> + 'track {
-        AvcSegmentIterator(self.samples.iter().peekable())
+        AvcSegmentIterator{
+            samples: self.samples.iter().peekable(),
+            max_ts: self.samples.iter().last().map(|s| s.dts )
+        }
     }
+
+    // TODO: this should be,
+    //  a) in terms of duration, not samples
+    //  b) configured, not hardcoded
+    pub const VIDEO_SAMPLES_PER_PART: usize = 8;
+
+    pub fn parts<'track>(&'track self, dts: u64) -> Result<impl Iterator<Item = PartInfo> + 'track, SegmentError> {
+        // TODO: this should be,
+        //  a) in terms of duration, not samples
+        //  b) configured, not hardcoded
+        const VIDEO_SAMPLES_PER_PART: usize = 8;
+
+        let latest = self.samples.iter().last().map(|s| s.dts );
+        if latest.is_none() {
+            return Err(SegmentError::NoSegments)
+        }
+        let latest = latest.unwrap();
+        let earliest_segment_with_parts = latest - SEG_DURATION_PTS * 3;
+        if dts < earliest_segment_with_parts {
+            return Err(SegmentError::NoPartsForSegment)
+        }
+
+        Ok(self.segment_samples(dts)?
+            .enumerate()
+            .group_by(|(i, _)| i / VIDEO_SAMPLES_PER_PART )
+            .into_iter()
+            .map(|(key, group)| {  // TODO: can we avoid allocating for 'group'?
+                // now, check that we have all the samples needed for a complete part, and remember
+                // if there's an IDR frame, so that the INDEPENDENT flag can be set in the HLS
+                // media-manifest
+                let (count, idr) = group
+                    .iter()
+                    .map(|(_, s)| s )
+                    .fold((0, false), |(count, idr), sample| (count+1, idr | is_idr(sample)) );
+                if count == VIDEO_SAMPLES_PER_PART {
+                    Some(PartInfo {
+                        part_id: key as u64,
+                        duration: Some(0.32),  // TODO: don't hardcode
+                        continuous: true,
+                        independent: idr,
+                    })
+                } else {
+                    None
+                }
+            })
+            .flat_map(|x| x))
+    }
+
     pub fn sps_bytes(&self) -> &[u8] {
         &self.sps_bytes[..]
     }
@@ -138,38 +197,57 @@ impl AvcTrack {
     }
 }
 
-struct AvcSegmentIterator<'track>(Peekable<vec_deque::Iter<'track, Sample>>);
+struct AvcPartIterator<'track> {
+    samples: Peekable<vec_deque::Iter<'track, Sample>>,
+}
+
+struct AvcSegmentIterator<'track> {
+    samples: Peekable<vec_deque::Iter<'track, Sample>>,
+    max_ts: Option<u64>
+}
 impl<'track> Iterator for AvcSegmentIterator<'track> {
     type Item = SegmentInfo;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.max_ts.is_none() {
+            return None;
+        }
+        let max_ts = self.max_ts.unwrap();
+
         let mut skipped = false;
         let mut discontinuity = false;
         let mut dts = None;
         loop {
-            match self.0.next() {
+            match self.samples.next() {
                 Some(sample) => {
                     if is_idr(sample) {
                         dts = Some(sample.dts);
                     }
 
                     if dts.is_some() {
-                        match self.0.peek() {
+                        match self.samples.peek() {
                             Some(peek) => {
                                 if is_idr(peek) {
                                     let duration = peek.dts - dts.unwrap();
                                     return Some(SegmentInfo {
                                         dts: dts.unwrap(),
-                                        duration: duration as f64 / 90000.0,
+                                        duration: Some(duration as f64 / 90000.0),
                                         continuous: true
                                     })
                                 }
                             },
-                            // Then we don't have enough samples to announce this segment yet; maybe
-                            // next time.  Problem if the stream ended though, since we will not make
-                            // those final samples available.  Need explicit EOS signal?
-                            None => return None,
+                            // Then we don't have enough samples to announce this segment yet;
+                            // we do indicate the possibility of a segment, but we don't indicate
+                            // it's duration yet,
+                            None => return Some(SegmentInfo {
+                                dts: dts.unwrap(),
+                                duration: None,
+                                continuous: true
+                            })
                         }
+                    } else {
+                        // TODO: what specifically do we want to respond in this case?
+                        eprintln!("IRD sample with no DTS");
                     }
                 },
                 None => return None,
@@ -227,6 +305,42 @@ impl AacTrack {
         self.samples.iter()
     }
 
+    pub fn parts<'track>(&'track self, dts: u64) -> Result<impl Iterator<Item = PartInfo> + 'track, SegmentError> {
+        // TODO: this should be,
+        //  a) in terms of duration, not samples
+        //  b) configured, not hardcoded
+        const AUDIO_SAMPLES_PER_PART: usize = 15;
+
+        let latest = self.samples.iter().last().map(|s| s.dts );
+        if latest.is_none() {
+            return Err(SegmentError::NoSegments)
+        }
+        let latest = latest.unwrap();
+        let earliest_segment_with_parts = latest - SEG_DURATION_PTS * 3;
+        if dts < earliest_segment_with_parts {
+            return Err(SegmentError::NoPartsForSegment)
+        }
+
+        Ok(self.segment_samples(dts)
+            .enumerate()
+            .group_by(|(i, _)| i / AUDIO_SAMPLES_PER_PART )
+            .into_iter()
+            .map(|(key, group)| {  // TODO: can we avoid allocating for 'group'?
+                // now, check that we have all the samples needed for a complete part
+                if group.len() == AUDIO_SAMPLES_PER_PART {
+                    Some(PartInfo {
+                        part_id: key as u64,
+                        duration: Some(0.32),  // TODO: don't hardcode
+                        continuous: true,
+                        independent: false,  // arguably could be true, and an audio media-manifest just ignores?
+                    })
+                } else {
+                    None
+                }
+            })
+            .flat_map(|x| x))
+    }
+
     pub fn segment_number_for(&self, dts: u64) -> Option<usize> {
         // TODO: assert first sample dts exactly equals given value, and that it is_idr()
         self.segments()
@@ -241,18 +355,29 @@ impl AacTrack {
         const AAC_SEGMENT_DURATION: f64 = 1.92;  // TODO: can't be hardcoded
 
         // apply a limit so as to avoid the last segment being announced while incomplete
+        // TODO: expose partial segment (duration:None)
         let limit = self.samples.len() / Self::AAC_SAMPLES_PER_SEGMENT;
 
         self.samples
             .iter()
             .enumerate()
-            .filter(|(i, s)| i % Self::AAC_SAMPLES_PER_SEGMENT == 0)
-            .map(|(i, s)| SegmentInfo {
-                dts: s.dts,
-                duration: AAC_SEGMENT_DURATION,
-                continuous: true, // TODO check for timing gaps etc.
-            } )
-            .take(limit)
+            .group_by(|(i, _)| i / Self::AAC_SAMPLES_PER_SEGMENT )
+            .into_iter()
+            .map(|(key, group)| {  // TODO: can we avoid allocating for 'group'?
+                if group.len() == Self::AAC_SAMPLES_PER_SEGMENT {
+                    SegmentInfo {
+                        dts: group[0].1.dts,
+                        duration: Some(AAC_SEGMENT_DURATION),
+                        continuous: true, // TODO check for timing gaps etc.
+                    }
+                } else {
+                    SegmentInfo {
+                        dts: group[0].1.dts,
+                        duration: None,
+                        continuous: true, // TODO check for timing gaps etc.
+                    }
+                }
+            })
     }
 
     pub fn sample(&self, dts: u64) -> Option<&Sample> {
@@ -283,18 +408,39 @@ impl AacTrack {
 
 pub struct SegmentInfo {
     dts: u64,
-    duration: f64,
+    duration: Option<f64>,
     continuous: bool,
 }
 impl SegmentInfo {
     pub fn id(&self) -> u64 {
         self.dts
     }
-    pub fn duration_seconds(&self) -> f64 {
+    pub fn duration_seconds(&self) -> Option<f64> {
         self.duration
     }
     pub fn is_continuous(&self) -> bool {
         self.continuous
+    }
+}
+
+pub struct PartInfo {
+    part_id: u64,
+    duration: Option<f64>,
+    continuous: bool,
+    independent: bool,
+}
+impl PartInfo {
+    pub fn id(&self) -> u64 {
+        self.part_id
+    }
+    pub fn duration_seconds(&self) -> Option<f64> {
+        self.duration
+    }
+    pub fn is_continuous(&self) -> bool {
+        self.continuous
+    }
+    pub fn is_independent(&self) -> bool {
+        self.independent
     }
 }
 

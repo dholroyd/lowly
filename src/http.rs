@@ -79,7 +79,7 @@ impl HlsService {
         let mut text = String::new();
         writeln!(text, "#EXTM3U").unwrap();
         // TODO: validate correct version vs. used HSL features
-        writeln!(text, "#EXT-X-VERSION:{}", 6).unwrap();
+        writeln!(text, "#EXT-X-VERSION:{}", 9).unwrap();
         writeln!(text, "#EXT-X-INDEPENDENT-SEGMENTS").unwrap();
         writeln!(text, "").unwrap();
 
@@ -190,8 +190,10 @@ impl HlsService {
         let mut text = String::new();
         writeln!(text, "#EXTM3U").unwrap();
         // TODO: validate correct version vs. used HSL features
-        writeln!(text, "#EXT-X-VERSION:{}", 6).unwrap();
+        writeln!(text, "#EXT-X-VERSION:{}", 9).unwrap();
         writeln!(text, "#EXT-X-INDEPENDENT-SEGMENTS").unwrap();
+        writeln!(text, "#EXT-X-PART-INF:PART-TARGET={:.3}", 0.32).unwrap();
+        writeln!(text, "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK={:0.3}", 0.96).unwrap();
         let mut track_ref = track_ref;
         match track_ref.track() {
             store::Track::Avc(ref avc_track) => {
@@ -202,13 +204,23 @@ impl HlsService {
                 writeln!(text,
                          "#EXT-X-MAP:URI=\"init.mp4\"")
                     .unwrap();
+                writeln!(text, "#EXT-X-PROGRAM-DATE-TIME:2019-02-14T02:13:36.106Z").unwrap();
                 // TODO: EXT-X-MEDIA-SEQUENCE
                 for seg in avc_track.segments() {
                     if !seg.is_continuous() {
                         writeln!(text, "#EXT-X-DISCONTINUITY").unwrap();
                     }
-                    writeln!(text, "#EXTINF:{:.3},{}", seg.duration_seconds(), "").unwrap();
-                    writeln!(text, "segment/{}/seg.mp4", seg.id()).unwrap();
+                    match avc_track.parts(seg.id()) {
+                        Ok(parts) => {
+                            Self::part_list(&mut text, &seg, parts)
+                        },
+                        Err(e) => (),
+                    };
+                    if let Some(duration) = seg.duration_seconds() {
+                        // only expecting the final, in-progress segment to lack duration
+                        writeln!(text, "#EXTINF:{:.3},{}", duration, "").unwrap();
+                        writeln!(text, "segment/{}/seg.mp4", seg.id()).unwrap();
+                    }
                 }
             },
             store::Track::Aac(ref aac_track) => {
@@ -219,13 +231,23 @@ impl HlsService {
                 writeln!(text,
                          "#EXT-X-MAP:URI=\"init.mp4\"")
                     .unwrap();
+                writeln!(text, "#EXT-X-PROGRAM-DATE-TIME:2019-02-14T02:13:36.106Z").unwrap();
                 // TODO: EXT-X-MEDIA-SEQUENCE
                 for seg in aac_track.segments() {
                     if !seg.is_continuous() {
                         writeln!(text, "#EXT-X-DISCONTINUITY").unwrap();
                     }
-                    writeln!(text, "#EXTINF:{:.3},{}", seg.duration_seconds(), "").unwrap();
-                    writeln!(text, "segment/{}/seg.mp4", seg.id()).unwrap();
+                    match aac_track.parts(seg.id()) {
+                        Ok(parts) => {
+                            Self::part_list(&mut text, &seg, parts)
+                        },
+                        Err(e) => (),
+                    };
+                    if let Some(duration) = seg.duration_seconds() {
+                        // only expecting the final, in-progress segment to lack duration
+                        writeln!(text, "#EXTINF:{:.3},{}", duration, "").unwrap();
+                        writeln!(text, "segment/{}/seg.mp4", seg.id()).unwrap();
+                    }
                 }
             },
         }
@@ -235,6 +257,20 @@ impl HlsService {
             .header("Access-Control-Allow-Origin", "*")
             .body(Body::from(text))
             .unwrap()
+    }
+
+    fn part_list(text: &mut String, seg: &store::SegmentInfo, parts: impl Iterator<Item=store::PartInfo>) -> () {
+        for part in parts {
+            write!(text,
+                   "#EXT-X-PART:DURATION={:.3},URI=\"segment/{}/part/{}.mp4\"",
+                   part.duration_seconds().unwrap(),
+                   seg.id(),
+                   part.id()).unwrap();
+            if part.is_independent() {
+                write!(text, ",INDEPENDENT=YES").unwrap();
+            }
+            writeln!(text).unwrap();
+        }
     }
 
     fn initialisation_segment(req: Request<Body>, track_ref: store::TrackRef) -> Response<Body> {
@@ -491,39 +527,93 @@ impl HlsService {
                 .unwrap()
         };
 
-        if Some("seg.mp4".to_string()) == rest {
-            let mut track_ref = track_ref;
-            let segment = match track_ref.track() {
-                store::Track::Avc(ref avc_track) => {
-                    Self::make_avc_segment(avc_track, segment_dts)
-                    //Self::make_avc_segment_ffmpeg(avc_track, segment_dts)
-                },
-                store::Track::Aac(ref aac_track) => {
-                    Self::make_aac_segment(aac_track, segment_dts)
-                },
-            };
-
-            let segment = match segment {
-                Ok(segment) => segment,
-                Err(e) => {
-                    eprintln!("Problem creating segment {} of track {}: {:?}", segment_dts, track_ref.id().0, e);
+        if let Some(rest) = rest {
+            if rest.starts_with("part/") {
+                let rest = &rest["part/".len()..];
+                if !rest.starts_with(".mp4") {
                     return Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Body::from("Problem creating segment"))
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::from("Invalid part request"))
                         .unwrap()
-
                 }
-            };
+                let part_id = if let Ok(part_id) = rest[..".mp4".len()].parse() {
+                    part_id
+                } else {
+                    return Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::from("Invalid part id"))
+                        .unwrap()
+                };
 
-            let mut data = vec![];
-            segment.write_to(&mut data).unwrap();
-            //data.extend_from_slice(segment.data());
+                let mut track_ref = track_ref;
+                let segment = match track_ref.track() {
+                    store::Track::Avc(ref avc_track) => {
+                        Self::make_avc_part(avc_track, segment_dts, part_id)
+                    },
+                    store::Track::Aac(ref aac_track) => {
+                        Self::make_aac_part(aac_track, segment_dts, part_id)
+                    },
+                };
+                let segment = match segment {
+                    Ok(segment) => segment,
+                    Err(e) => {
+                        eprintln!("Problem creating part {} of segment {} of track {}: {:?}", part_id, segment_dts, track_ref.id().0, e);
+                        return Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Body::from("Problem creating segment"))
+                            .unwrap()
 
-            Response::builder()
-                .header("Content-Type", "video/mp4")
-                .header("Access-Control-Allow-Origin", "*")
-                .body(Body::from(data))
-                .unwrap()
+                    }
+                };
+
+                let mut data = vec![];
+                segment.write_to(&mut data).unwrap();
+                //data.extend_from_slice(segment.data());
+
+                Response::builder()
+                    .header("Content-Type", "video/mp4")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Body::from(data))
+                    .unwrap()
+            } else if "seg.mp4" == rest {
+                let mut track_ref = track_ref;
+                let segment = match track_ref.track() {
+                    store::Track::Avc(ref avc_track) => {
+                        Self::make_avc_segment(avc_track, segment_dts)
+                        //Self::make_avc_segment_ffmpeg(avc_track, segment_dts)
+                    },
+                    store::Track::Aac(ref aac_track) => {
+                        Self::make_aac_segment(aac_track, segment_dts)
+                    },
+                };
+
+                let segment = match segment {
+                    Ok(segment) => segment,
+                    Err(e) => {
+                        eprintln!("Problem creating segment {} of track {}: {:?}", segment_dts, track_ref.id().0, e);
+                        return Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Body::from("Problem creating segment"))
+                            .unwrap()
+
+                    }
+                };
+
+                let mut data = vec![];
+                segment.write_to(&mut data).unwrap();
+                //data.extend_from_slice(segment.data());
+
+                Response::builder()
+                    .header("Content-Type", "video/mp4")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Body::from(data))
+                    .unwrap()
+            } else {
+                Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::from("Don't know how to produce such a segment"))
+                    .unwrap()
+            }
         } else {
             Response::builder()
                 .status(StatusCode::BAD_REQUEST)
@@ -541,7 +631,52 @@ impl HlsService {
     }
 */
     fn make_avc_segment(avc_track: &store::AvcTrack, dts: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
-        let avc_stream = Self::create_avc_stream(avc_track, dts).unwrap(); // TODO
+        let avc_stream = Self::create_avc_stream(avc_track, dts, 0, std::usize::MAX).unwrap(); // TODO
+
+        let mut segment = fmp4::MediaSegment::default();
+        if let Some(seq) = avc_track.segment_number_for(dts) {
+            segment.moof_box.mfhd_box.sequence_number = seq as u32;
+        }
+
+        // video traf
+        let mut traf = fmp4::TrackFragmentBox::new(true);
+        traf.tfdt_box.base_media_decode_time = dts as u32;
+        traf.tfhd_box.default_sample_flags = Some(fmp4::SampleFlags {
+            is_leading: 0,
+            sample_depends_on: 1,
+            sample_is_depdended_on: 0,
+            sample_has_redundancy: 0,
+            sample_padding_value: 0,
+            sample_is_non_sync_sample: true,
+            sample_degradation_priority: 0,
+        });
+        traf.trun_box.data_offset = Some(0); // dummy
+        traf.trun_box.first_sample_flags = Some(fmp4::SampleFlags {
+            is_leading: 0,
+            sample_depends_on: 2,
+            sample_is_depdended_on: 0,
+            sample_has_redundancy: 0,
+            sample_padding_value: 0,
+            sample_is_non_sync_sample: false,
+            sample_degradation_priority: 0,
+        });
+        traf.trun_box.samples = avc_stream.samples;
+        segment.moof_box.traf_boxes.push(traf);
+
+        // mdat and offsets adjustment
+        let mut counter = mse_fmp4::io::ByteCounter::with_sink();
+        segment.moof_box.write_box(&mut counter)?;
+        segment.moof_box.traf_boxes[0].trun_box.data_offset = Some(counter.count() as i32 + 8);
+
+        segment.mdat_boxes.push(fmp4::MediaDataBox {
+            data: avc_stream.data,
+        });
+
+        Ok(segment)
+    }
+
+    fn make_avc_part(avc_track: &store::AvcTrack, dts: u64, part_id: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
+        let avc_stream = Self::create_avc_stream(avc_track, dts, part_id as usize, store::AvcTrack::VIDEO_SAMPLES_PER_PART).unwrap(); // TODO
 
         let mut segment = fmp4::MediaSegment::default();
         if let Some(seq) = avc_track.segment_number_for(dts) {
@@ -586,7 +721,7 @@ impl HlsService {
     }
 
     // reformat the data into the form accepted by the mse_fmp4 crate
-    fn create_avc_stream(avc_track: &store::AvcTrack, dts: u64) -> Result<AvcStream, store::SegmentError> {
+    fn create_avc_stream(avc_track: &store::AvcTrack, dts: u64, offset: usize, limit: usize) -> Result<AvcStream, store::SegmentError> {
         let mut avc_stream = AvcStream {
             samples: vec![],
             data: vec![]
@@ -594,7 +729,7 @@ impl HlsService {
         let mut avc_timestamps = Vec::new();
         let mut avc_timestamp_offset = 0;
 
-        for sample in avc_track.segment_samples(dts)? {
+        for sample in avc_track.segment_samples(dts)?.skip(offset).take(limit) {
             let i = avc_timestamps.len();
             let mut timestamp = sample.pts;
             if i == 0 {
@@ -661,6 +796,9 @@ impl HlsService {
         });
 
         Ok(segment)
+    }
+    fn make_aac_part(avc_track: &store::AacTrack, dts: u64, part_id: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
+        unimplemented!()
     }
 
     fn create_aac_stream(avc_track: &store::AacTrack, dts: u64) -> AacStream {

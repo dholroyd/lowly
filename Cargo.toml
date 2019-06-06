@@ -16,6 +16,7 @@ byteorder = "1.3"
 #ffmpeg-sys = "3.4"
 hexdump = "0.1.0"
 adts-reader = "0.2"
+itertools = "0.4.19"
 
 [profile.release]
 debug = true
