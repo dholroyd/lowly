@@ -36,6 +36,7 @@ pub struct AvcTrack {
     sps_bytes: Vec<u8>,
     pps_bytes: Vec<u8>,
     samples: VecDeque<Sample>,
+    max_bitrate: Option<u32>,
 }
 impl AvcTrack {
     fn new(
@@ -43,6 +44,7 @@ impl AvcTrack {
         pps: nal::pps::PicParameterSet,
         sps_bytes: Vec<u8>,
         pps_bytes: Vec<u8>,
+        max_bitrate: Option<u32>
     ) -> AvcTrack {
         AvcTrack {
             sps,
@@ -50,6 +52,7 @@ impl AvcTrack {
             sps_bytes,
             pps_bytes,
             samples: VecDeque::new(),
+            max_bitrate,
         }
     }
 
@@ -100,9 +103,9 @@ impl AvcTrack {
             .find(|sample| sample.dts == dts )
     }
 
-    pub fn bandwidth(&self) -> u32 {
+    pub fn bandwidth(&self) -> Option<u32> {
         // TODO: measure max bandwidth per GOP, and report here
-        250000
+        self.max_bitrate
     }
 
     pub fn rfc6381_codec(&self) -> String {
@@ -270,18 +273,21 @@ pub struct AacTrack {
     profile: adts_reader::AudioObjectType,
     frequency: adts_reader::SamplingFrequency,
     channel_config: adts_reader::ChannelConfiguration,
+    max_bitrate: Option<u32>,
 }
 impl AacTrack {
     fn new(
         profile: adts_reader::AudioObjectType,
         frequency: adts_reader::SamplingFrequency,
         channel_config: adts_reader::ChannelConfiguration,
+        max_bitrate: Option<u32>,
     ) -> AacTrack {
         AacTrack {
             samples: VecDeque::new(),
             profile,
             frequency,
             channel_config,
+            max_bitrate,
         }
     }
 
@@ -508,9 +514,10 @@ impl Store {
         pps: nal::pps::PicParameterSet,
         sps_bytes: Vec<u8>,
         pps_bytes: Vec<u8>,
+        max_bitrate: Option<u32>
     ) -> TrackId {
         let mut state = self.get_state_mut();
-        let track = AvcTrack::new(sps, pps, sps_bytes, pps_bytes);
+        let track = AvcTrack::new(sps, pps, sps_bytes, pps_bytes, max_bitrate);
         let id = TrackId(state.tracks.len());
         state.tracks.push(Track::Avc(track));
         id
@@ -539,9 +546,10 @@ impl Store {
         profile: adts_reader::AudioObjectType,
         frequency: adts_reader::SamplingFrequency,
         channel_config: adts_reader::ChannelConfiguration,
+        max_bitrate: Option<u32>,
     ) -> TrackId {
         let mut state = self.get_state_mut();
-        let track = AacTrack::new(profile, frequency, channel_config);
+        let track = AacTrack::new(profile, frequency, channel_config, max_bitrate);
         let id = TrackId(state.tracks.len());
         state.tracks.push(Track::Aac(track));
         id

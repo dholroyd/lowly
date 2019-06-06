@@ -91,10 +91,13 @@ impl HlsService {
                     // TODO:
                     //  - FRAMERATE
                     let (width, height) = avc_track.dimensions();
+                    write!(text, "#EXT-X-STREAM-INF:").unwrap();
+                    if let Some(bandwidth) = avc_track.bandwidth() {
+                        // BANDWITH is mandatory; but if we don't know it, what to do!
+                        write!(text, "BANDWIDTH={},", bandwidth).unwrap();
+                    }
                     writeln!(text,
-                             "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={}x{},AUDIO=\"default-audio-group\"",
-                             avc_track.bandwidth(),
-                             //avc_track.rfc6381_codec(),
+                             "RESOLUTION={}x{},AUDIO=\"default-audio-group\"",
                              width,
                              height)
                         .unwrap();

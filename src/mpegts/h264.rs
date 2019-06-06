@@ -154,9 +154,10 @@ struct IngestH264Context {
     last_dts: Option<pes::Timestamp>,
     sps_bytes: HashMap<nal::pps::ParamSetId, Vec<u8>>,
     pps_bytes: HashMap<nal::pps::ParamSetId, Vec<u8>>,
+    max_bitrate: Option<u32>,
 }
 impl IngestH264Context {
-    fn new(store: store::Store) -> Self {
+    fn new(store: store::Store, max_bitrate: Option<u32>) -> Self {
         IngestH264Context {
             store,
             track_id: None,
@@ -164,6 +165,7 @@ impl IngestH264Context {
             last_dts: None,
             sps_bytes: HashMap::new(),
             pps_bytes: HashMap::new(),
+            max_bitrate,
         }
     }
 
@@ -194,7 +196,7 @@ impl IngestH264Context {
         let track_id = if let Some(tid) = self.track_id {
             tid
         } else {
-            let tid = self.store.allocate_avc_track(sps, pps, sps_bytes, pps_bytes);
+            let tid = self.store.allocate_avc_track(sps, pps, sps_bytes, pps_bytes, self.max_bitrate);
             self.track_id = Some(tid);
             tid
         };
@@ -293,13 +295,22 @@ pub struct H264ElementaryStreamConsumer {
 }
 impl H264ElementaryStreamConsumer {
     pub fn construct(stream_info: &psi::pmt::StreamInfo, store: store::Store) -> pes::PesPacketFilter<IngestDemuxContext, H264ElementaryStreamConsumer> {
-        let ctx = IngestH264Context::new(store);
+        let mut max_bitrate = None;
         for desc in stream_info.descriptors::<descriptor::CoreDescriptors>() {
             match desc {
-                Ok(d) => println!("  H264 {:?}: {:?}", stream_info.elementary_pid(), d),
-                Err(e) => println!("  Error reading descriptor: {:?}", e),
+                Ok(d) => match d {
+                    mpeg2ts_reader::descriptor::CoreDescriptors::MaximumBitrate(max) => {
+                        // TODO: if we could already have allocated a store::AvcTrack by here,
+                        //       we could pass the data in more directly, rather than bouncing it
+                        //       via the IngestH264Context instance,
+                        max_bitrate = Some(max.maximum_bits_per_second());
+                    }
+                    _ => println!("  H264 {:?}: {:?}", stream_info.elementary_pid(), d),
+                }
+                Err(e) => println!("  H264 {:?}: Error reading descriptor: {:?}", stream_info.elementary_pid(), e),
             }
         }
+        let ctx = IngestH264Context::new(store, max_bitrate);
         let mut switch = h264_reader::nal::NalSwitch::new();
         let sei_handler = h264_reader::nal::sei::SeiNalHandler::new(IngestSeiPayoadReader { switch: SeiSwitch::default() });
         let sps_handler = SpsIngestNalHandler::default();

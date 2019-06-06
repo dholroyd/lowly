@@ -8,6 +8,7 @@ struct IngestAdtsConsumer {
     track_id: Option<store::TrackId>,
     last_pts: Option<pes::Timestamp>,
     last_dts: Option<pes::Timestamp>,
+    max_bitrate: Option<u32>,
 }
 impl IngestAdtsConsumer {
     fn set_pts_dts(&mut self, pts: Option<pes::Timestamp>, dts: Option<pes::Timestamp>) {
@@ -27,7 +28,7 @@ impl IngestAdtsConsumer {
 }
 impl adts_reader::AdtsConsumer for IngestAdtsConsumer {
     fn new_config(&mut self, mpeg_version: adts_reader::MpegVersion, protection: adts_reader::ProtectionIndicator, aot: adts_reader::AudioObjectType, freq: adts_reader::SamplingFrequency, private_bit: u8, channels: adts_reader::ChannelConfiguration, originality: adts_reader::Originality, home: u8) {
-        self.track_id = Some(self.store.allocate_aac_track(aot, freq, channels));
+        self.track_id = Some(self.store.allocate_aac_track(aot, freq, channels, self.max_bitrate));
         println!("ADTS {:?} new config: {:?} {:?} {:?} {:?} {:?} {:?} home={:?}", self.pid, mpeg_version, protection, aot, freq, channels, originality, home);
     }
     fn payload(&mut self, buffer_fullness: u16, no_of_blocks: u8, buf: &[u8]) {
@@ -49,10 +50,19 @@ pub struct AdtsElementaryStreamConsumer {
 }
 impl AdtsElementaryStreamConsumer {
     pub fn construct(stream_info: &psi::pmt::StreamInfo, store: store::Store) -> pes::PesPacketFilter<IngestDemuxContext, AdtsElementaryStreamConsumer> {
+        let mut max_bitrate = None;
         for desc in stream_info.descriptors::<descriptor::CoreDescriptors>() {
             match desc {
-                Ok(d) => println!("  ADTS {:?}: {:?}", stream_info.elementary_pid(), d),
-                Err(e) => println!("  Error reading descriptor: {:?}", e),
+                Ok(d) => match d {
+                    mpeg2ts_reader::descriptor::CoreDescriptors::MaximumBitrate(max) => {
+                        // TODO: if we could already have allocated a store::AvcTrack by here,
+                        //       we could pass the data in more directly, rather than bouncing it
+                        //       via the IngestH264Context instance,
+                        max_bitrate = Some(max.maximum_bits_per_second());
+                    }
+                    _ => println!("  ADTS {:?}: {:?}", stream_info.elementary_pid(), d),
+                }
+                Err(e) => println!("  ADTS {:?}: Error reading descriptor: {:?}", stream_info.elementary_pid(), e),
             }
         }
         pes::PesPacketFilter::new(
@@ -63,6 +73,7 @@ impl AdtsElementaryStreamConsumer {
                     track_id: None,
                     last_pts: None,
                     last_dts: None,
+                    max_bitrate,
                 })
             }
         )
