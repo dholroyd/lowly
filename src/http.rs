@@ -1,5 +1,5 @@
-use hyper::{Body, Request, Response, Server, StatusCode};
-use futures::future::Future;
+use hyper::{Body, Request, Response, Server, StatusCode, Uri};
+use futures::future::{Future, Either};
 use hyper::service::Service;
 use crate::store;
 use futures::future;
@@ -12,6 +12,11 @@ use mse_fmp4::io::WriteTo;
 use mse_fmp4::fmp4::common::Mp4Box;
 use mpeg2ts_reader::pes::Timestamp;
 use byteorder::WriteBytesExt;
+use url::Url;
+use futures::stream::Stream;
+
+type ImmediateFut = future::FutureResult<Response<Body>, HlsServiceError>;
+type MediaManifestFut = Box<dyn Future<Item=Response<Body>, Error=HlsServiceError> + Send>;
 
 struct HlsService {
     store: store::Store,
@@ -20,14 +25,14 @@ impl Service for HlsService {
     type ReqBody = Body;
     type ResBody = Body;
     type Error = HlsServiceError;
-    type Future = future::FutureResult<Response<Self::ResBody>, Self::Error>;
+    type Future = Either<ImmediateFut, MediaManifestFut>;
 
     fn call(&mut self, req: Request<Self::ReqBody>) -> Self::Future {
         let path = req.uri().path();
-        let resp = if path == "/stream.html" {
-            self.stream_html(req)
+        if path == "/stream.html" {
+            Either::A(self.stream_html(req))
         } else if path.starts_with("/master.m3u8") {
-            self.master_manifest(req)
+            Either::A(self.master_manifest(req))
         } else if path.starts_with("/track/") {
             let mut parts = path["/track/".len()..].splitn(2, "/");
             let id = parts.next();
@@ -37,22 +42,24 @@ impl Service for HlsService {
                 let rest = rest.map(|s| s.to_string() );
                 self.track(req, id, rest)
             } else {
-                Response::builder()
+                Either::A(futures::future::ok(Response::builder()
                     .status(StatusCode::BAD_REQUEST)
                     .body(Body::from("Need a track id"))
-                    .unwrap()
+                    .unwrap()))
             }
         } else {
-            Response::builder()
+            Either::A(futures::future::ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(Body::from("I don't know that one"))
-                .unwrap()
-        };
-        futures::future::ok(resp)
+                .unwrap()))
+        }
     }
 }
+
+
 impl HlsService {
-    fn stream_html(&mut self, req: Request<Body>) -> Response<Body> {
+
+    fn stream_html(&mut self, req: Request<Body>) -> ImmediateFut {
         let mut text = String::new();
         text.write_str("<html><body>\n").unwrap();
         text.write_str("<h1>Stream info</h1>\n").unwrap();
@@ -69,13 +76,13 @@ impl HlsService {
             text.write_str("</ul>\n").unwrap();
         }
         text.write_str("</body></html>\n").unwrap();
-        Response::builder()
+        futures::future::ok(Response::builder()
             .header("Content-Type", "text/html")
             .body(Body::from(text))
-            .unwrap()
+            .unwrap())
     }
 
-    fn master_manifest(&mut self, req: Request<Body>) -> Response<Body> {
+    fn master_manifest(&mut self, req: Request<Body>) -> ImmediateFut {
         let mut text = String::new();
         writeln!(text, "#EXTM3U").unwrap();
         // TODO: validate correct version vs. used HSL features
@@ -117,79 +124,177 @@ impl HlsService {
                 }
             }
         }
-        Response::builder()
+        futures::future::ok(Response::builder()
             .header("Content-Type", "application/vnd.apple.mpegurl")
             .header("Access-Control-Allow-Origin", "*")
             .body(Body::from(text))
-            .unwrap()
+            .unwrap())
     }
 
-    fn track(&mut self, req: Request<Body>, track_id: String, rest: Option<String>) -> Response<Body> {
+    fn track(&mut self, req: Request<Body>, track_id: String, rest: Option<String>) -> Either<ImmediateFut, MediaManifestFut> {
         if let Ok(id) = track_id.parse() {
-            if let Some(track) = self.store.get_track(store::TrackId(id)) {
-                if let Some(rest) = rest {
-                    if "track.html" == rest {
-                        Self::track_html(req, track)
-                    } else if "media.m3u8" == rest {
-                        Self::media_manifest(req, track)
-                    } else if "init.mp4" == rest {
-                        Self::initialisation_segment(req, track)
-                    } else if rest.starts_with("segment/") {
-                        let mut parts = rest["segment/".len()..].splitn(2, "/");
-                        let id = parts.next();
-                        let rest = parts.next();
-                        if let Some(id) = id {
-                            let id = id.to_string();
-                            let rest = rest.map(|s| s.to_string() );
-                            Self::fmp4_segment(req, track, id, rest)
-                        } else {
-                            Response::builder()
-                                .status(StatusCode::BAD_REQUEST)
-                                .body(Body::from("Need a segment id"))
-                                .unwrap()
-                        }
-                    } else if rest.starts_with("sample/") {
-                        let mut parts = rest["sample/".len()..].splitn(2, "/");
-                        let id = parts.next();
-                        let rest = parts.next();
-                        if let Some(id) = id {
-                            let id = id.to_string();
-                            let rest = rest.map(|s| s.to_string() );
-                            Self::sample_html(req, track, id, rest)
-                        } else {
-                            Response::builder()
-                                .status(StatusCode::BAD_REQUEST)
-                                .body(Body::from("Need a sample id"))
-                                .unwrap()
-                        }
-
-                    } else {
-                        Response::builder()
-                            .status(StatusCode::BAD_REQUEST)
-                            .body(Body::from("Don't know how to do that to a track"))
-                            .unwrap()
-                    }
-                } else {
-                    Response::builder()
-                        .status(StatusCode::NOT_FOUND)
-                        .body(Body::from("What do you want to do with this track?"))
-                        .unwrap()
-                }
-            } else {
-                Response::builder()
+            let track_id = store::TrackId(id);
+            if self.store.get_track(track_id).is_none() {
+                return Either::A(futures::future::ok(Response::builder()
                     .status(StatusCode::NOT_FOUND)
                     .body(Body::from("No such track"))
-                    .unwrap()
+                    .unwrap()))
+            }
+            if let Some(rest) = rest {
+                if "track.html" == rest {
+                    Either::A(Self::track_html(req, self.store.get_track(track_id).unwrap()))
+                } else if "media.m3u8" == rest {
+                    Self::media_manifest(req, &mut self.store, track_id)
+                } else if "init.mp4" == rest {
+                    Either::A(Self::initialisation_segment(req, self.store.get_track(track_id).unwrap()))
+                } else if rest.starts_with("segment/") {
+                    let mut parts = rest["segment/".len()..].splitn(2, "/");
+                    let id = parts.next();
+                    let rest = parts.next();
+                    if let Some(id) = id {
+                        let id = id.to_string();
+                        let rest = rest.map(|s| s.to_string() );
+                        Either::A(futures::future::ok(Self::fmp4_segment(req, self.store.get_track(track_id).unwrap(), id, rest)))
+                    } else {
+                        Either::A(futures::future::ok(Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .body(Body::from("Need a segment id"))
+                            .unwrap()))
+                    }
+                } else if rest.starts_with("sample/") {
+                    let mut parts = rest["sample/".len()..].splitn(2, "/");
+                    let id = parts.next();
+                    let rest = parts.next();
+                    if let Some(id) = id {
+                        let id = id.to_string();
+                        let rest = rest.map(|s| s.to_string() );
+                        Either::A(futures::future::ok(Self::sample_html(req, self.store.get_track(track_id).unwrap(), id, rest)))
+                    } else {
+                        Either::A(futures::future::ok(Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .body(Body::from("Need a sample id"))
+                            .unwrap()))
+                    }
+
+                } else {
+                    Either::A(futures::future::ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::from("Don't know how to do that to a track"))
+                        .unwrap()))
+                }
+            } else {
+                Either::A(futures::future::ok(Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Body::from("What do you want to do with this track?"))
+                    .unwrap()))
             }
         } else {
-            Response::builder()
+            Either::A(futures::future::ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::from("Bad track id"))
-                .unwrap()
+                .unwrap()))
         }
     }
 
-    fn media_manifest(req: Request<Body>, track_ref: store::TrackRef) -> Response<Body> {
+    fn hls_request_params(uri: &Uri) -> HlsRequest {
+        // hack to turn the relative URL into a qualified one that Url::parse() will accept,
+        let url = Url::parse(&format!("http://localhost{}", uri)).unwrap();
+        let q = url.query_pairs();
+        let mut req = HlsRequest::default();
+        for (key, value) in q {
+            match &*key {
+                "_HLS_msn" => {
+                    if let Ok(msn) = value.parse() {
+                        req.msn = Some(msn);
+                    }
+                },
+                "_HLS_part" => {
+                    if let Ok(part) = value.parse() {
+                        req.part = Some(part);
+                    }
+                },
+                "_HLS_push" => {
+                    if let Ok(push) = value.parse() {
+                        req.push = Some(push);
+                    }
+                },
+                _ => {}
+            }
+        }
+        req
+    }
+
+    fn media_manifest(req: Request<Body>, store: &mut store::Store, id: store::TrackId) -> Either<ImmediateFut, MediaManifestFut> {
+        let hls_request = Self::hls_request_params(req.uri());
+        if let Some(request_msn) = hls_request.msn {
+            let current_msn = {
+                let mut track_ref = store.get_track(id).unwrap();
+                match track_ref.track() {
+                    store::Track::Avc(ref avc_track) => avc_track.media_sequence_number(),
+                    store::Track::Aac(ref aac_track) => aac_track.media_sequence_number(),
+                }
+            };
+            if request_msn > current_msn + 1 {
+                // per the spec, return HTTP 400 error response
+
+                return Either::A(futures::future::ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::from("Sequence number requested too early"))
+                    .unwrap()))
+            }
+            if request_msn == current_msn + 1 {
+                // block waiting for the next segment
+                return Either::B(Box::new(Self::block_for_media_manifest(store, id, hls_request)));
+            }
+        }
+        let mut track_ref = store.get_track(id).unwrap();
+        let text = Self::render_media_manifest(track_ref);
+
+        Either::A(futures::future::ok(Response::builder()
+            .header("Content-Type", "application/vnd.apple.mpegurl")
+            .header("Access-Control-Allow-Origin", "*")
+            .body(Body::from(text))
+            .unwrap()))
+    }
+
+    fn block_for_media_manifest(store: &mut store::Store, id: store::TrackId, req: HlsRequest) -> impl Future<Item=Response<Body>, Error=HlsServiceError> {
+        let msn = req.msn.unwrap();
+        let seq_stream = {
+            let mut track_ref = store.get_track(id).unwrap();
+            match track_ref.track() {
+                store::Track::Avc(ref avc_track) => avc_track.sequence_stream(),
+                store::Track::Aac(ref aac_track) => aac_track.sequence_stream(),
+            }
+        };
+        let mut store = store.clone();
+        seq_stream
+            .skip_while(move |seq| future::ok(seq.seg < msn && req.part.map(|p| seq.part < p ).unwrap_or(true) ))
+            .into_future()
+            .map_err(|(e, _stream)| panic!("Unexpected watch error {:?}", e) )
+            .and_then(move |(seq, _stream)| {
+                let mut track_ref = store.get_track(id).unwrap();
+                let text = Self::render_media_manifest(track_ref);
+                let mut b = Response::builder();
+                b.header("Content-Type", "application/vnd.apple.mpegurl");
+                b.header("Access-Control-Allow-Origin", "*");
+                if let Some(seq) = seq {
+                    if req.push.map(|p| p > 0).unwrap_or(false) {
+                        if let Some(part) = req.part {
+                            let mut track_ref = store.get_track(id).unwrap();
+                            let segment = match track_ref.track() {
+                                store::Track::Avc(ref avc_track) => avc_track.segments().nth(seq.seg as usize),
+                                store::Track::Aac(ref aac_track) => aac_track.segments().nth(seq.seg as usize),
+                            }.unwrap();
+                            b.header("Link", format!("<segment/{}/part/{}.mp4>; rel=preload; as=video; type=video/mp4", segment.id(), part));
+                        }
+                        // TODO: push segment if no part was requested?
+                    }
+                }
+                futures::future::ok(b.body(Body::from(text)).unwrap())
+            })
+    }
+
+    fn render_media_manifest(track_ref: store::TrackRef) -> String {
         let mut text = String::new();
         writeln!(text, "#EXTM3U").unwrap();
         // TODO: validate correct version vs. used HSL features
@@ -254,12 +359,7 @@ impl HlsService {
                 }
             },
         }
-
-        Response::builder()
-            .header("Content-Type", "application/vnd.apple.mpegurl")
-            .header("Access-Control-Allow-Origin", "*")
-            .body(Body::from(text))
-            .unwrap()
+        text
     }
 
     fn part_list(text: &mut String, seg: &store::SegmentInfo, parts: impl Iterator<Item=store::PartInfo>) -> () {
@@ -276,7 +376,7 @@ impl HlsService {
         }
     }
 
-    fn initialisation_segment(req: Request<Body>, track_ref: store::TrackRef) -> Response<Body> {
+    fn initialisation_segment(req: Request<Body>, track_ref: store::TrackRef) -> ImmediateFut {
         let mut track_ref = track_ref;
         let init = match track_ref.track() {
             store::Track::Avc(ref avc_track) => {
@@ -290,22 +390,21 @@ impl HlsService {
             Ok(init) => init,
             Err(e) => {
                 eprintln!("Problem creating initialisation segment of track {}: {:?}", track_ref.id().0, e);
-                return Response::builder()
+                return futures::future::ok(Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(Body::from("Problem creating initialisation segment"))
-                    .unwrap()
-
+                    .unwrap())
             }
         };
 
         let mut data = vec![];
         init.write_to(&mut data).unwrap();
 
-        Response::builder()
+        futures::future::ok(Response::builder()
             .header("Content-Type", "video/mp4")
             .header("Access-Control-Allow-Origin", "*")
             .body(Body::from(data))
-            .unwrap()
+            .unwrap())
     }
 
     fn make_avc_initialisation_segment(avc_track: &store::AvcTrack) -> Result<fmp4::InitializationSegment, mse_fmp4::Error> {
@@ -402,7 +501,7 @@ impl HlsService {
         Ok(segment)
     }
 
-    fn track_html(req: Request<Body>, track_ref: store::TrackRef) -> Response<Body> {
+    fn track_html(req: Request<Body>, track_ref: store::TrackRef) -> ImmediateFut {
         let mut text = String::new();
         text.write_str("<html><body>\n").unwrap();
         writeln!(text, "<h1>Track {}</h1>", track_ref.id().0).unwrap();
@@ -414,10 +513,10 @@ impl HlsService {
         }
 
         text.write_str("</body></html>\n").unwrap();
-        Response::builder()
+        futures::future::ok(Response::builder()
             .header("Content-Type", "text/html")
             .body(Body::from(text))
-            .unwrap()
+            .unwrap())
     }
 
     fn avc_track_html(req: Request<Body>, text: &mut String, track: &store::AvcTrack) {
@@ -851,9 +950,16 @@ impl futures::IntoFuture for HlsService {
     }
 }
 
+#[derive(Default, Clone, Copy)]
+struct HlsRequest {
+    msn: Option<u64>,
+    part: Option<u16>,
+    push: Option<u16>,
+}
+
 #[derive(Debug)]
 enum HlsServiceError {
-
+    Unimplemented
 }
 impl error::Error for HlsServiceError {
 

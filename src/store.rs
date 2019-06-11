@@ -5,6 +5,8 @@ use std::collections::vec_deque;
 use std::iter::Peekable;
 use h264_reader::nal::UnitType;
 use itertools::Itertools;
+use tokio_sync::watch;
+use futures::stream::Stream;
 
 pub const SEG_DURATION_PTS: u64 = 172800;
 
@@ -30,6 +32,13 @@ pub enum SegmentError {
     NoPartsForSegment,
 }
 
+/// Notification value used to describe updates to a track in the face of media being ingested
+#[derive(Default, Debug, Clone, Copy)]
+pub struct TrackSequence {
+    pub seg: u64,
+    pub part: u16,
+}
+
 pub struct AvcTrack {
     sps: nal::sps::SeqParameterSet,
     pps: nal::pps::PicParameterSet,
@@ -37,6 +46,7 @@ pub struct AvcTrack {
     pps_bytes: Vec<u8>,
     samples: VecDeque<Sample>,
     max_bitrate: Option<u32>,
+    watch: (watch::Sender<TrackSequence>, watch::Receiver<TrackSequence>),
 }
 impl AvcTrack {
     fn new(
@@ -53,11 +63,20 @@ impl AvcTrack {
             pps_bytes,
             samples: VecDeque::new(),
             max_bitrate,
+            watch: watch::channel(TrackSequence::default()),
         }
     }
 
     pub fn push(&mut self, sample: Sample) {
         self.samples.push_back(sample);
+        // TODO: pretty inefficient!
+        let (this_msn, this_seg) = self.segments().enumerate().last().unwrap();
+        let this_part = self.parts(this_seg.id()).unwrap().count() - 1;
+        let seq = TrackSequence {
+            seg: this_msn as u64,
+            part: this_part as u16,
+        };
+        self.watch.0.broadcast(seq).unwrap()
         // TODO: remove old samples
     }
     pub fn pps(&self) -> &h264_reader::nal::pps::PicParameterSet {
@@ -97,6 +116,10 @@ impl AvcTrack {
         }
     }
 
+    pub fn sequence_stream(&self) -> watch::Receiver<TrackSequence> {
+        self.watch.1.clone()
+    }
+
     pub fn sample(&self, dts: u64) -> Option<&Sample> {
         self.samples
             .iter()
@@ -123,6 +146,10 @@ impl AvcTrack {
             samples: self.samples.iter().peekable(),
             max_ts: self.samples.iter().last().map(|s| s.dts )
         }
+    }
+
+    pub fn media_sequence_number(&self) -> u64 {
+        self.segments().count() as u64
     }
 
     // TODO: this should be,
@@ -274,6 +301,7 @@ pub struct AacTrack {
     frequency: adts_reader::SamplingFrequency,
     channel_config: adts_reader::ChannelConfiguration,
     max_bitrate: Option<u32>,
+    watch: (watch::Sender<TrackSequence>, watch::Receiver<TrackSequence>),
 }
 impl AacTrack {
     fn new(
@@ -288,6 +316,7 @@ impl AacTrack {
             frequency,
             channel_config,
             max_bitrate,
+            watch: watch::channel(TrackSequence::default()),
         }
     }
 
@@ -386,6 +415,10 @@ impl AacTrack {
             })
     }
 
+    pub fn media_sequence_number(&self) -> u64 {
+        self.segments().count() as u64
+    }
+
     pub fn sample(&self, dts: u64) -> Option<&Sample> {
         self.samples
             .iter()
@@ -397,6 +430,10 @@ impl AacTrack {
         self.samples()
             .skip_while(move |sample| sample.dts < dts )
             .take(Self::AAC_SAMPLES_PER_SEGMENT)
+    }
+
+    pub fn sequence_stream(&self) -> watch::Receiver<TrackSequence> {
+        self.watch.1.clone()
     }
 
     pub fn profile(&self) -> adts_reader::AudioObjectType {
