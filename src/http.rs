@@ -632,13 +632,13 @@ impl HlsService {
         if let Some(rest) = rest {
             if rest.starts_with("part/") {
                 let rest = &rest["part/".len()..];
-                if !rest.starts_with(".mp4") {
+                if !rest.ends_with(".mp4") {
                     return Response::builder()
                         .status(StatusCode::BAD_REQUEST)
                         .body(Body::from("Invalid part request"))
                         .unwrap()
                 }
-                let part_id = if let Ok(part_id) = rest[..".mp4".len()].parse() {
+                let part_id = if let Ok(part_id) = rest[..rest.len()-".mp4".len()].parse() {
                     part_id
                 } else {
                     return Response::builder()
