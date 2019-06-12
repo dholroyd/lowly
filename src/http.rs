@@ -14,6 +14,7 @@ use mpeg2ts_reader::pes::Timestamp;
 use byteorder::WriteBytesExt;
 use url::Url;
 use futures::stream::Stream;
+use crate::store::SegmentError;
 
 type ImmediateFut = future::FutureResult<Response<Body>, HlsServiceError>;
 type MediaManifestFut = Box<dyn Future<Item=Response<Body>, Error=HlsServiceError> + Send>;
@@ -318,12 +319,14 @@ impl HlsService {
                     if !seg.is_continuous() {
                         writeln!(text, "#EXT-X-DISCONTINUITY").unwrap();
                     }
-                    match avc_track.parts(seg.id()) {
-                        Ok(parts) => {
-                            Self::part_list(&mut text, &seg, parts)
-                        },
-                        Err(e) => (),
-                    };
+                    if avc_track.has_parts(seg.id()) {
+                        match avc_track.parts(seg.id()) {
+                            Ok(parts) => {
+                                Self::part_list(&mut text, &seg, parts)
+                            },
+                            Err(e) => (),
+                        }
+                    }
                     if let Some(duration) = seg.duration_seconds() {
                         // only expecting the final, in-progress segment to lack duration
                         writeln!(text, "#EXTINF:{:.3},{}", duration, "").unwrap();
@@ -345,12 +348,14 @@ impl HlsService {
                     if !seg.is_continuous() {
                         writeln!(text, "#EXT-X-DISCONTINUITY").unwrap();
                     }
-                    match aac_track.parts(seg.id()) {
-                        Ok(parts) => {
-                            Self::part_list(&mut text, &seg, parts)
-                        },
-                        Err(e) => (),
-                    };
+                    if aac_track.has_parts(seg.id()) {
+                        match aac_track.parts(seg.id()) {
+                            Ok(parts) => {
+                                Self::part_list(&mut text, &seg, parts)
+                            },
+                            Err(e) => (),
+                        }
+                    }
                     if let Some(duration) = seg.duration_seconds() {
                         // only expecting the final, in-progress segment to lack duration
                         writeln!(text, "#EXTINF:{:.3},{}", duration, "").unwrap();
@@ -781,7 +786,7 @@ impl HlsService {
         let avc_stream = Self::create_avc_stream(avc_track, dts, part_id as usize, store::AvcTrack::VIDEO_SAMPLES_PER_PART).unwrap(); // TODO
 
         let mut segment = fmp4::MediaSegment::default();
-        if let Some(seq) = avc_track.segment_number_for(dts) {
+        if let Some(seq) = avc_track.part_number_for(dts, part_id) {
             segment.moof_box.mfhd_box.sequence_number = seq as u32;
         }
 
@@ -874,7 +879,7 @@ impl HlsService {
     }
 
     fn make_aac_segment(aac_track: &store::AacTrack, dts: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
-        let aac_stream = Self::create_aac_stream(aac_track, dts);
+        let aac_stream = Self::create_aac_stream(aac_track, dts, 0, std::usize::MAX).unwrap();
 
         let mut segment = fmp4::MediaSegment::default();
         if let Some(seq) = aac_track.segment_number_for(dts) {
@@ -899,11 +904,35 @@ impl HlsService {
 
         Ok(segment)
     }
-    fn make_aac_part(avc_track: &store::AacTrack, dts: u64, part_id: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
-        unimplemented!()
+
+    fn make_aac_part(aac_track: &store::AacTrack, dts: u64, part_id: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
+        let aac_stream = Self::create_aac_stream(aac_track, dts, part_id as usize, store::AacTrack::AUDIO_FRAMES_PER_PART).unwrap(); // TODO
+
+        let mut segment = fmp4::MediaSegment::default();
+        if let Some(seq) = aac_track.part_number_for(dts, part_id) {
+            segment.moof_box.mfhd_box.sequence_number = seq as u32;
+        }
+
+        let mut traf = fmp4::TrackFragmentBox::new(false);
+        traf.tfdt_box.base_media_decode_time = dts as u32;
+        traf.tfhd_box.default_sample_duration = Some(aac::SAMPLES_IN_FRAME as u32);
+        traf.trun_box.data_offset = Some(0); // dummy
+        traf.trun_box.samples = aac_stream.samples;
+        segment.moof_box.traf_boxes.push(traf);
+
+        // mdat and offsets adjustment
+        let mut counter = mse_fmp4::io::ByteCounter::with_sink();
+        segment.moof_box.write_box(&mut counter)?;
+        segment.moof_box.traf_boxes[0].trun_box.data_offset = Some(counter.count() as i32 + 8);
+
+        segment.mdat_boxes.push(fmp4::MediaDataBox {
+            data: aac_stream.data,
+        });
+
+        Ok(segment)
     }
 
-    fn create_aac_stream(avc_track: &store::AacTrack, dts: u64) -> AacStream {
+    fn create_aac_stream(avc_track: &store::AacTrack, dts: u64, offset: usize, limit: usize) -> Result<AacStream, SegmentError> {
         let mut aac_stream = AacStream {
             samples: vec![],
             data: vec![]
@@ -911,7 +940,7 @@ impl HlsService {
         let mut aac_timestamps = Vec::new();
         let mut aac_timestamp_offset = 0;
 
-        for sample in avc_track.segment_samples(dts) {
+        for sample in avc_track.segment_samples(dts).skip(offset).take(limit) {
             let i = aac_timestamps.len();
             let mut timestamp = sample.pts;
             if i == 0 {
@@ -937,7 +966,7 @@ impl HlsService {
             });
         }
 
-        aac_stream
+        Ok(aac_stream)
     }
 }
 impl futures::IntoFuture for HlsService {

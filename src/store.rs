@@ -98,6 +98,21 @@ impl AvcTrack {
             .map(|(i, _)| i )
     }
 
+    pub fn part_number_for(&self, dts: u64, part_id: u64) -> Option<usize> {
+        Some(self.segments()
+            .take_while(|seg| seg.dts <= dts)
+            .flat_map(|seg| {
+                let limit = if seg.dts == dts {
+                    part_id
+                } else {
+                    std::u64::MAX
+                };
+                self.parts(seg.id()).unwrap(/*TODO*/)
+                    .take_while(move |part| part.id() <= limit)
+            })
+            .count())
+    }
+
     pub fn segment_samples(&self, dts: u64) -> Result<impl Iterator<Item = &Sample>, SegmentError> {
         let mut iter = self.samples()
             .skip_while(move |sample| sample.dts < dts )
@@ -157,21 +172,21 @@ impl AvcTrack {
     //  b) configured, not hardcoded
     pub const VIDEO_SAMPLES_PER_PART: usize = 8;
 
+    pub fn has_parts(&self, dts: u64) -> bool {
+        let latest = self.samples.iter().last().map(|s| s.dts );
+        if latest.is_none() {
+            return false
+        }
+        let latest = latest.unwrap();
+        let earliest_segment_with_parts = latest - SEG_DURATION_PTS * 3;
+        dts >= earliest_segment_with_parts
+    }
+
     pub fn parts<'track>(&'track self, dts: u64) -> Result<impl Iterator<Item = PartInfo> + 'track, SegmentError> {
         // TODO: this should be,
         //  a) in terms of duration, not samples
         //  b) configured, not hardcoded
         const VIDEO_SAMPLES_PER_PART: usize = 8;
-
-        let latest = self.samples.iter().last().map(|s| s.dts );
-        if latest.is_none() {
-            return Err(SegmentError::NoSegments)
-        }
-        let latest = latest.unwrap();
-        let earliest_segment_with_parts = latest - SEG_DURATION_PTS * 3;
-        if dts < earliest_segment_with_parts {
-            return Err(SegmentError::NoPartsForSegment)
-        }
 
         Ok(self.segment_samples(dts)?
             .enumerate()
@@ -304,6 +319,8 @@ pub struct AacTrack {
     watch: (watch::Sender<TrackSequence>, watch::Receiver<TrackSequence>),
 }
 impl AacTrack {
+    pub const AUDIO_FRAMES_PER_PART: usize = 15;  // TODO
+
     fn new(
         profile: adts_reader::AudioObjectType,
         frequency: adts_reader::SamplingFrequency,
@@ -340,21 +357,29 @@ impl AacTrack {
         self.samples.iter()
     }
 
+    fn latest_dts(&self) -> Result<u64, SegmentError> {
+        let latest = self.samples.iter().last().map(|s| s.dts );
+        if latest.is_none() {
+            return Err(SegmentError::NoSegments)
+        }
+        Ok(latest.unwrap())
+    }
+
+    pub fn has_parts(&self, dts: u64) -> bool {
+        let latest = match self.latest_dts() {
+            Ok(latest) => latest,
+            Err(_) => return false,
+        };
+        let earliest_segment_with_parts = latest - SEG_DURATION_PTS * 3;
+        dts >= earliest_segment_with_parts
+    }
+
     pub fn parts<'track>(&'track self, dts: u64) -> Result<impl Iterator<Item = PartInfo> + 'track, SegmentError> {
         // TODO: this should be,
         //  a) in terms of duration, not samples
         //  b) configured, not hardcoded
         const AUDIO_SAMPLES_PER_PART: usize = 15;
 
-        let latest = self.samples.iter().last().map(|s| s.dts );
-        if latest.is_none() {
-            return Err(SegmentError::NoSegments)
-        }
-        let latest = latest.unwrap();
-        let earliest_segment_with_parts = latest - SEG_DURATION_PTS * 3;
-        if dts < earliest_segment_with_parts {
-            return Err(SegmentError::NoPartsForSegment)
-        }
 
         Ok(self.segment_samples(dts)
             .enumerate()
@@ -382,6 +407,21 @@ impl AacTrack {
             .enumerate()
             .find(|(i, seg)| seg.dts == dts)
             .map(|(i, _)| i )
+    }
+
+    pub fn part_number_for(&self, dts: u64, part_id: u64) -> Option<usize> {
+        Some(self.segments()
+            .take_while(|seg| seg.dts <= dts)
+            .flat_map(|seg| {
+                let limit = if seg.dts == dts {
+                    part_id
+                } else {
+                    std::u64::MAX
+                };
+                self.parts(seg.id()).unwrap(/*TODO*/)
+                    .take_while(move |part| part.id() <= limit)
+            })
+            .count())
     }
 
     const AAC_SAMPLES_PER_SEGMENT: usize = 90;  // TODO: can't be hardcoded
