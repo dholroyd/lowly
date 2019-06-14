@@ -12,8 +12,8 @@ pub const SEG_DURATION_PTS: u64 = 172800;
 
 pub struct Sample {
     pub data: Vec<u8>,
-    pub pts: u64,
-    pub dts: u64,
+    pub pts: i64,
+    pub dts: i64,
     pub header: SampleHeader,
 }
 
@@ -24,7 +24,7 @@ pub enum SampleHeader {
 
 #[derive(Debug)]
 pub enum SegmentError {
-    BadSampleTime(u64),
+    BadSampleTime(i64),
     /// Tried to inspect segment information, but no segments exist within the track (yet)
     NoSegments,
     /// Tried to inspect the parts for a segment, but the segment does not have any parts (hls
@@ -70,13 +70,14 @@ impl AvcTrack {
     pub fn push(&mut self, sample: Sample) {
         self.samples.push_back(sample);
         // TODO: pretty inefficient!
-        let (this_msn, this_seg) = self.segments().enumerate().last().unwrap();
-        let this_part = self.parts(this_seg.id()).unwrap().count() - 1;
-        let seq = TrackSequence {
-            seg: this_msn as u64,
-            part: this_part as u16,
-        };
-        self.watch.0.broadcast(seq).unwrap()
+        if let Some((this_msn, this_seg)) = self.segments().enumerate().last() {
+            let this_part = self.parts(this_seg.id()).unwrap().count() - 1;
+            let seq = TrackSequence {
+                seg: this_msn as u64,
+                part: this_part as u16,
+            };
+            self.watch.0.broadcast(seq).unwrap()
+        }
         // TODO: remove old samples
     }
     pub fn pps(&self) -> &h264_reader::nal::pps::PicParameterSet {
@@ -90,7 +91,7 @@ impl AvcTrack {
         self.samples.iter()
     }
 
-    pub fn segment_number_for(&self, dts: u64) -> Option<usize> {
+    pub fn segment_number_for(&self, dts: i64) -> Option<usize> {
         // TODO: assert first sample dts exactly equals given value, and that it is_idr()
         self.segments()
             .enumerate()
@@ -98,7 +99,7 @@ impl AvcTrack {
             .map(|(i, _)| i )
     }
 
-    pub fn part_number_for(&self, dts: u64, part_id: u64) -> Option<usize> {
+    pub fn part_number_for(&self, dts: i64, part_id: u64) -> Option<usize> {
         Some(self.segments()
             .take_while(|seg| seg.dts <= dts)
             .flat_map(|seg| {
@@ -113,7 +114,7 @@ impl AvcTrack {
             .count())
     }
 
-    pub fn segment_samples(&self, dts: u64) -> Result<impl Iterator<Item = &Sample>, SegmentError> {
+    pub fn segment_samples(&self, dts: i64) -> Result<impl Iterator<Item = &Sample>, SegmentError> {
         let mut iter = self.samples()
             .skip_while(move |sample| sample.dts < dts )
             .enumerate()
@@ -135,7 +136,7 @@ impl AvcTrack {
         self.watch.1.clone()
     }
 
-    pub fn sample(&self, dts: u64) -> Option<&Sample> {
+    pub fn sample(&self, dts: i64) -> Option<&Sample> {
         self.samples
             .iter()
             .find(|sample| sample.dts == dts )
@@ -172,17 +173,17 @@ impl AvcTrack {
     //  b) configured, not hardcoded
     pub const VIDEO_SAMPLES_PER_PART: usize = 8;
 
-    pub fn has_parts(&self, dts: u64) -> bool {
+    pub fn has_parts(&self, dts: i64) -> bool {
         let latest = self.samples.iter().last().map(|s| s.dts );
         if latest.is_none() {
             return false
         }
         let latest = latest.unwrap();
-        let earliest_segment_with_parts = latest - SEG_DURATION_PTS * 3;
+        let earliest_segment_with_parts = latest - (SEG_DURATION_PTS * 3) as i64;
         dts >= earliest_segment_with_parts
     }
 
-    pub fn parts<'track>(&'track self, dts: u64) -> Result<impl Iterator<Item = PartInfo> + 'track, SegmentError> {
+    pub fn parts<'track>(&'track self, dts: i64) -> Result<impl Iterator<Item = PartInfo> + 'track, SegmentError> {
         // TODO: this should be,
         //  a) in terms of duration, not samples
         //  b) configured, not hardcoded
@@ -248,7 +249,7 @@ struct AvcPartIterator<'track> {
 
 struct AvcSegmentIterator<'track> {
     samples: Peekable<vec_deque::Iter<'track, Sample>>,
-    max_ts: Option<u64>
+    max_ts: Option<i64>
 }
 impl<'track> Iterator for AvcSegmentIterator<'track> {
     type Item = SegmentInfo;
@@ -357,7 +358,7 @@ impl AacTrack {
         self.samples.iter()
     }
 
-    fn latest_dts(&self) -> Result<u64, SegmentError> {
+    fn latest_dts(&self) -> Result<i64, SegmentError> {
         let latest = self.samples.iter().last().map(|s| s.dts );
         if latest.is_none() {
             return Err(SegmentError::NoSegments)
@@ -365,16 +366,16 @@ impl AacTrack {
         Ok(latest.unwrap())
     }
 
-    pub fn has_parts(&self, dts: u64) -> bool {
+    pub fn has_parts(&self, dts: i64) -> bool {
         let latest = match self.latest_dts() {
             Ok(latest) => latest,
             Err(_) => return false,
         };
-        let earliest_segment_with_parts = latest - SEG_DURATION_PTS * 3;
+        let earliest_segment_with_parts = latest - (SEG_DURATION_PTS * 3) as i64;
         dts >= earliest_segment_with_parts
     }
 
-    pub fn parts<'track>(&'track self, dts: u64) -> Result<impl Iterator<Item = PartInfo> + 'track, SegmentError> {
+    pub fn parts<'track>(&'track self, dts: i64) -> Result<impl Iterator<Item = PartInfo> + 'track, SegmentError> {
         // TODO: this should be,
         //  a) in terms of duration, not samples
         //  b) configured, not hardcoded
@@ -401,7 +402,7 @@ impl AacTrack {
             .flat_map(|x| x))
     }
 
-    pub fn segment_number_for(&self, dts: u64) -> Option<usize> {
+    pub fn segment_number_for(&self, dts: i64) -> Option<usize> {
         // TODO: assert first sample dts exactly equals given value, and that it is_idr()
         self.segments()
             .enumerate()
@@ -409,7 +410,7 @@ impl AacTrack {
             .map(|(i, _)| i )
     }
 
-    pub fn part_number_for(&self, dts: u64, part_id: u64) -> Option<usize> {
+    pub fn part_number_for(&self, dts: i64, part_id: u64) -> Option<usize> {
         Some(self.segments()
             .take_while(|seg| seg.dts <= dts)
             .flat_map(|seg| {
@@ -459,13 +460,13 @@ impl AacTrack {
         self.segments().count() as u64
     }
 
-    pub fn sample(&self, dts: u64) -> Option<&Sample> {
+    pub fn sample(&self, dts: i64) -> Option<&Sample> {
         self.samples
             .iter()
             .find(|sample| sample.dts == dts )
     }
 
-    pub fn segment_samples(&self, dts: u64) -> impl Iterator<Item = &Sample> {
+    pub fn segment_samples(&self, dts: i64) -> impl Iterator<Item = &Sample> {
         // TODO: assert first sample dts exactly equals given value, and that it is_idr()
         self.samples()
             .skip_while(move |sample| sample.dts < dts )
@@ -490,12 +491,12 @@ impl AacTrack {
 }
 
 pub struct SegmentInfo {
-    dts: u64,
+    dts: i64,
     duration: Option<f64>,
     continuous: bool,
 }
 impl SegmentInfo {
-    pub fn id(&self) -> u64 {
+    pub fn id(&self) -> i64 {
         self.dts
     }
     pub fn duration_seconds(&self) -> Option<f64> {

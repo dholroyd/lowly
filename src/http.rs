@@ -727,7 +727,7 @@ impl HlsService {
         }
     }
 /*
-    fn make_avc_segment_ffmpeg(avc_track: &store::AvcTrack, dts: u64) -> crate::fmp4::Buf {
+    fn make_avc_segment_ffmpeg(avc_track: &store::AvcTrack, dts: i64) -> crate::fmp4::Buf {
         let mut builder = crate::fmp4::FragmentBuilder::new();
         for sample in avc_track.segment_samples(dts) {
             builder.add_sample(sample.dts, sample.pts, &sample.data[..]);
@@ -735,7 +735,7 @@ impl HlsService {
         builder.finalize()
     }
 */
-    fn make_avc_segment(avc_track: &store::AvcTrack, dts: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
+    fn make_avc_segment(avc_track: &store::AvcTrack, dts: i64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
         let avc_stream = Self::create_avc_stream(avc_track, dts, 0, std::usize::MAX).unwrap(); // TODO
 
         let mut segment = fmp4::MediaSegment::default();
@@ -780,7 +780,7 @@ impl HlsService {
         Ok(segment)
     }
 
-    fn make_avc_part(avc_track: &store::AvcTrack, dts: u64, part_id: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
+    fn make_avc_part(avc_track: &store::AvcTrack, dts: i64, part_id: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
         let avc_stream = Self::create_avc_stream(avc_track, dts, part_id as usize, store::AvcTrack::VIDEO_SAMPLES_PER_PART).unwrap(); // TODO
 
         let mut segment = fmp4::MediaSegment::default();
@@ -826,7 +826,7 @@ impl HlsService {
     }
 
     // reformat the data into the form accepted by the mse_fmp4 crate
-    fn create_avc_stream(avc_track: &store::AvcTrack, dts: u64, offset: usize, limit: usize) -> Result<AvcStream, store::SegmentError> {
+    fn create_avc_stream(avc_track: &store::AvcTrack, dts: i64, offset: usize, limit: usize) -> Result<AvcStream, store::SegmentError> {
         let mut avc_stream = AvcStream {
             samples: vec![],
             data: vec![]
@@ -842,7 +842,7 @@ impl HlsService {
             }
             if timestamp < avc_timestamp_offset {
                 // TODO: this code for handling TS wrap is from mse_fmp4; maybe an underlying Timestamp type could handle this directly
-                timestamp += Timestamp::MAX.value();
+                timestamp += Timestamp::MAX.value() as i64;
             }
             avc_timestamps.push((timestamp - avc_timestamp_offset, i));
 
@@ -876,7 +876,7 @@ impl HlsService {
         Ok(avc_stream)
     }
 
-    fn make_aac_segment(aac_track: &store::AacTrack, dts: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
+    fn make_aac_segment(aac_track: &store::AacTrack, dts: i64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
         let aac_stream = Self::create_aac_stream(aac_track, dts, 0, std::usize::MAX).unwrap();
 
         let mut segment = fmp4::MediaSegment::default();
@@ -903,7 +903,7 @@ impl HlsService {
         Ok(segment)
     }
 
-    fn make_aac_part(aac_track: &store::AacTrack, dts: u64, part_id: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
+    fn make_aac_part(aac_track: &store::AacTrack, dts: i64, part_id: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
         let aac_stream = Self::create_aac_stream(aac_track, dts, part_id as usize, store::AacTrack::AUDIO_FRAMES_PER_PART).unwrap(); // TODO
 
         let mut segment = fmp4::MediaSegment::default();
@@ -930,7 +930,7 @@ impl HlsService {
         Ok(segment)
     }
 
-    fn create_aac_stream(avc_track: &store::AacTrack, dts: u64, offset: usize, limit: usize) -> Result<AacStream, SegmentError> {
+    fn create_aac_stream(avc_track: &store::AacTrack, dts: i64, offset: usize, limit: usize) -> Result<AacStream, SegmentError> {
         let mut aac_stream = AacStream {
             samples: vec![],
             data: vec![]
@@ -946,7 +946,7 @@ impl HlsService {
             }
             if timestamp < aac_timestamp_offset {
                 // TODO: this code for handling TS wrap is from mse_fmp4; maybe an underlying Timestamp type could handle this directly
-                timestamp += Timestamp::MAX.value();
+                timestamp += Timestamp::MAX.value() as i64;
             }
             aac_timestamps.push((timestamp - aac_timestamp_offset, i));
 

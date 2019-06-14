@@ -5,6 +5,7 @@ use mpeg2ts_reader::{
     pes,
 };
 use crate::store;
+use mpeg2ts_reader::pes::Timestamp;
 
 mod h264;
 mod adts;
@@ -80,4 +81,86 @@ pub fn create_demux(store: store::Store) -> (IngestDemuxContext, demultiplex::De
     let mut ctx = IngestDemuxContext::new(store);
     let demux = demultiplex::Demultiplex::new(&mut ctx);
     (ctx, demux)
+}
+
+struct UnwrapTimestamp {
+    last: Option<Timestamp>,
+    carry: u64,
+}
+impl Default for UnwrapTimestamp {
+    fn default() -> Self {
+        UnwrapTimestamp {
+            last: None,
+            carry: 0
+        }
+    }
+}
+impl UnwrapTimestamp {
+    /// Panics if the `update()` method as never been called
+    fn unwrap(&self, ts: Timestamp) -> i64 {
+        // check invariant,
+        assert_eq!(self.carry & Timestamp::MAX.value(), 0);
+
+        let last = self.last.expect("No previous call to update");
+        let diff = ts.value() as i64 - last.value() as i64;
+        let half = (Timestamp::MAX.value() / 2) as i64;
+        if diff > half {
+            ts.value() as i64 + self.carry as i64 - (Timestamp::MAX.value() + 1) as i64
+        } else if diff < -(half as i64) {
+            ts.value() as i64 + self.carry as i64 + (Timestamp::MAX.value() + 1) as i64
+        } else {
+            ts.value() as i64 + self.carry as i64
+        }
+    }
+
+    fn update(&mut self, ts: Timestamp) {
+        if let Some (last) = self.last {
+            let half = (Timestamp::MAX.value() / 2) as i64;
+            let diff = ts.value() as i64 - last.value() as i64;
+            if diff < -(half as i64) {
+                self.carry += (Timestamp::MAX.value() + 1);
+            }
+        }
+        self.last = Some(ts);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use mpeg2ts_reader::pes::Timestamp;
+
+    #[test]
+    fn basic() {
+        let mut unwrap = UnwrapTimestamp::default();
+        let a = Timestamp::from_u64(0);
+        let b = Timestamp::from_u64(1);
+
+        unwrap.update(a);
+        let c = unwrap.unwrap(b);
+        assert_eq!(c, 1);
+    }
+
+    #[test]
+    fn basic_wrap() {
+        let mut unwrap = UnwrapTimestamp::default();
+        let a = Timestamp::MAX;
+        let b = Timestamp::from_u64(0);
+
+        unwrap.update(a);
+        let c = unwrap.unwrap(b);
+        assert_eq!(c, (Timestamp::MAX.value() + 1) as i64);
+    }
+
+    #[test]
+    fn backwards() {
+        let mut unwrap = UnwrapTimestamp::default();
+        let a = Timestamp::from_u64(0);
+        let b = Timestamp::MAX;
+
+        unwrap.update(a);
+        let c = unwrap.unwrap(b);
+        assert_eq!(c, -1 as i64);
+    }
+
 }

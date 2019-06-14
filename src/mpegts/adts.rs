@@ -9,6 +9,7 @@ struct IngestAdtsConsumer {
     last_pts: Option<pes::Timestamp>,
     last_dts: Option<pes::Timestamp>,
     max_bitrate: Option<u32>,
+    unwrap_ts: super::UnwrapTimestamp,
 }
 impl IngestAdtsConsumer {
     fn set_pts_dts(&mut self, pts: Option<pes::Timestamp>, dts: Option<pes::Timestamp>) {
@@ -32,12 +33,29 @@ impl adts_reader::AdtsConsumer for IngestAdtsConsumer {
         println!("ADTS {:?} new config: {:?} {:?} {:?} {:?} {:?} {:?} home={:?}", self.pid, mpeg_version, protection, aot, freq, channels, originality, home);
     }
     fn payload(&mut self, buffer_fullness: u16, no_of_blocks: u8, buf: &[u8]) {
-        let pts = self.last_pts.map(|ts| ts.value() ).unwrap_or(0);
+        let (dts, pts) = if let Some(dts) = self.last_dts {
+            self.unwrap_ts.update(dts);
+            (
+                self.unwrap_ts.unwrap(dts),
+                self.last_pts.map(|pts| self.unwrap_ts.unwrap(pts)).unwrap_or(0),
+            )
+        } else {
+            if let Some(pts) = self.last_pts {
+                self.unwrap_ts.update(pts);
+                let pts = self.unwrap_ts.unwrap(pts);
+                (
+                    pts,
+                    pts,
+                )
+            } else {
+                (0, 0)
+            }
+        };
         self.store.add_aac_sample(self.track_id.unwrap(), store::Sample {
             header: store::SampleHeader::Aac,
             data: buf.to_vec(),
             pts,
-            dts: self.last_dts.map(|ts| ts.value() ).unwrap_or(pts),
+            dts,
         })
     }
     fn error(&mut self, err: adts_reader::AdtsParseError) {
@@ -74,6 +92,7 @@ impl AdtsElementaryStreamConsumer {
                     last_pts: None,
                     last_dts: None,
                     max_bitrate,
+                    unwrap_ts: super::UnwrapTimestamp::default(),
                 })
             }
         )

@@ -155,6 +155,7 @@ struct IngestH264Context {
     sps_bytes: HashMap<nal::pps::ParamSetId, Vec<u8>>,
     pps_bytes: HashMap<nal::pps::ParamSetId, Vec<u8>>,
     max_bitrate: Option<u32>,
+    unwrap_ts: super::UnwrapTimestamp,
 }
 impl IngestH264Context {
     fn new(store: store::Store, max_bitrate: Option<u32>) -> Self {
@@ -166,6 +167,7 @@ impl IngestH264Context {
             sps_bytes: HashMap::new(),
             pps_bytes: HashMap::new(),
             max_bitrate,
+            unwrap_ts: super::UnwrapTimestamp::default(),
         }
     }
 
@@ -200,12 +202,29 @@ impl IngestH264Context {
             self.track_id = Some(tid);
             tid
         };
-        let pts = self.last_pts.map(|ts| ts.value() ).unwrap_or(0);
+        let (dts, pts) = if let Some(dts) = self.last_dts {
+            self.unwrap_ts.update(dts);
+            (
+                self.unwrap_ts.unwrap(dts),
+                self.last_pts.map(|pts| self.unwrap_ts.unwrap(pts)).unwrap_or(0),
+            )
+        } else {
+            if let Some(pts) = self.last_pts {
+                self.unwrap_ts.update(pts);
+                let pts = self.unwrap_ts.unwrap(pts);
+                (
+                    pts,
+                    pts,
+                )
+            } else {
+                (0, 0)
+            }
+        };
         self.store.add_avc_sample(track_id, store::Sample {
             header: store::SampleHeader::Avc(nal_header, slice_header),
             data: slice_data,
             pts,
-            dts: self.last_dts.map(|ts| ts.value() ).unwrap_or(pts),
+            dts,
         });
     }
 
