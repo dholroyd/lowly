@@ -313,7 +313,6 @@ impl HlsService {
                 writeln!(text,
                          "#EXT-X-MAP:URI=\"init.mp4\"")
                     .unwrap();
-                writeln!(text, "#EXT-X-PROGRAM-DATE-TIME:2019-02-14T02:13:36.106Z").unwrap();
                 // TODO: EXT-X-MEDIA-SEQUENCE
                 for seg in avc_track.segments() {
                     if !seg.is_continuous() {
@@ -342,7 +341,6 @@ impl HlsService {
                 writeln!(text,
                          "#EXT-X-MAP:URI=\"init.mp4\"")
                     .unwrap();
-                writeln!(text, "#EXT-X-PROGRAM-DATE-TIME:2019-02-14T02:13:36.106Z").unwrap();
                 // TODO: EXT-X-MEDIA-SEQUENCE
                 for seg in aac_track.segments() {
                     if !seg.is_continuous() {
