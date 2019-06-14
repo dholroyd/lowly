@@ -87,7 +87,7 @@ impl HlsService {
         let mut text = String::new();
         writeln!(text, "#EXTM3U").unwrap();
         // TODO: validate correct version vs. used HSL features
-        writeln!(text, "#EXT-X-VERSION:{}", 9).unwrap();
+        writeln!(text, "#EXT-X-VERSION:{}", 7).unwrap();
         writeln!(text, "#EXT-X-INDEPENDENT-SEGMENTS").unwrap();
         writeln!(text, "").unwrap();
 
@@ -298,8 +298,8 @@ impl HlsService {
     fn render_media_manifest(track_ref: store::TrackRef) -> String {
         let mut text = String::new();
         writeln!(text, "#EXTM3U").unwrap();
-        // TODO: validate correct version vs. used HSL features
-        writeln!(text, "#EXT-X-VERSION:{}", 9).unwrap();
+        // TODO: validate correct version vs. used HLS features
+        writeln!(text, "#EXT-X-VERSION:{}", 7).unwrap();
         writeln!(text, "#EXT-X-INDEPENDENT-SEGMENTS").unwrap();
         writeln!(text, "#EXT-X-PART-INF:PART-TARGET={:.3}", 0.32).unwrap();
         writeln!(text, "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK={:0.3}", 0.96).unwrap();
