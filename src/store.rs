@@ -270,13 +270,13 @@ impl<'track> Iterator for AvcSegmentIterator<'track> {
                         dts = Some(sample.dts);
                     }
 
-                    if dts.is_some() {
+                    if let Some(last_idr_dts) = dts {
                         match self.samples.peek() {
                             Some(peek) => {
                                 if is_idr(peek) {
-                                    let duration = peek.dts - dts.unwrap();
+                                    let duration = peek.dts - last_idr_dts;
                                     return Some(SegmentInfo {
-                                        dts: dts.unwrap(),
+                                        dts: last_idr_dts,
                                         duration: Some(duration as f64 / 90000.0),
                                         continuous: true
                                     })
@@ -286,14 +286,11 @@ impl<'track> Iterator for AvcSegmentIterator<'track> {
                             // we do indicate the possibility of a segment, but we don't indicate
                             // it's duration yet,
                             None => return Some(SegmentInfo {
-                                dts: dts.unwrap(),
+                                dts: last_idr_dts,
                                 duration: None,
                                 continuous: true
                             })
                         }
-                    } else {
-                        // TODO: what specifically do we want to respond in this case?
-                        eprintln!("IRD sample with no DTS");
                     }
                 },
                 None => return None,
