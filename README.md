@@ -21,8 +21,8 @@ Output:
 ```
 
 ## ⛔ Limitations
- - Unbounded playlist length!  Old segments are never removed from media-manifests
- - In-memory storage!  The stream will run until the host system runs out of RAM, at which point the process will abort
+ - Hardcoded rewind window (1 hour)
+ - In-memory only!  Media is not written to persistent storage.
  - Audio must be AAC 48khz
  - Video must be AVC 25fps, with an IDR every 48 frames
  - Haven't been able to test the low latency aspect on an actual player!  (Standard latency stream has had basic tests
@@ -56,8 +56,7 @@ General HLS features,
  - [ ] No `EXT-X-I-FRAME-STREAM-INF` / `EXT-X-I-FRAMES-ONLY`
  - [ ] No DRM
  - [ ] No `EXT-X-ENDLIST` (there's currently no way to end the stream)
- - [ ] No `EXT-X-MEDIA-SEQUENCE` since the rewind window never shrinks, msn is never announced (implicitly `1` at start of
-       media-manifest)
+ - [x] `EXT-X-MEDIA-SEQUENCE` (after stream duration reaches hardcoded limit and old segments start being removed)
  - [ ] doubtless lots of other mandatory spec features that are not implemented right now!
  
  

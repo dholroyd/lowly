@@ -6,9 +6,10 @@ use std::iter::Peekable;
 use h264_reader::nal::UnitType;
 use itertools::Itertools;
 use tokio_sync::watch;
-use futures::stream::Stream;
 
 pub const SEG_DURATION_PTS: u64 = 172800;
+
+const ARCHIVE_LIMIT: u64 = 60 * 60 * 90000;  // 1 hour
 
 pub struct Sample {
     pub data: Vec<u8>,
@@ -47,6 +48,7 @@ pub struct AvcTrack {
     samples: VecDeque<Sample>,
     max_bitrate: Option<u32>,
     watch: (watch::Sender<TrackSequence>, watch::Receiver<TrackSequence>),
+    first_seg_num: usize,
 }
 impl AvcTrack {
     fn new(
@@ -64,6 +66,7 @@ impl AvcTrack {
             samples: VecDeque::new(),
             max_bitrate,
             watch: watch::channel(TrackSequence::default()),
+            first_seg_num: 0,
         }
     }
 
@@ -73,12 +76,30 @@ impl AvcTrack {
         if let Some((this_msn, this_seg)) = self.segments().enumerate().last() {
             let this_part = self.parts(this_seg.id()).unwrap().count() - 1;
             let seq = TrackSequence {
-                seg: this_msn as u64,
+                seg: this_msn as u64 + self.first_seg_num as u64,
                 part: this_part as u16,
             };
             self.watch.0.broadcast(seq).unwrap()
         }
-        // TODO: remove old samples
+        while self.duration() > ARCHIVE_LIMIT {
+            self.remove_one_segment();
+        }
+    }
+    fn remove_one_segment(&mut self) {
+        let mut i = 0;
+        while i == 0 || !is_idr(&self.samples[0]) {
+            self.samples.pop_front();
+            i += 1;
+        }
+        self.first_seg_num += 1;
+    }
+    fn duration(&self) -> u64 {
+        let len = self.samples.len();
+        if len < 2 {
+            0
+        } else {
+            (self.samples[len - 1].dts - self.samples[0].dts) as u64
+        }
     }
     pub fn pps(&self) -> &h264_reader::nal::pps::PicParameterSet {
         &self.pps
@@ -96,7 +117,8 @@ impl AvcTrack {
         self.segments()
             .enumerate()
             .find(|(i, seg)| seg.dts == dts)
-            .map(|(i, _)| i )
+            .map(|(i, _)| i + self.first_seg_num )
+
     }
 
     pub fn part_number_for(&self, dts: i64, part_id: u64) -> Option<usize> {
@@ -160,7 +182,8 @@ impl AvcTrack {
     pub fn segments<'track>(&'track self) -> impl Iterator<Item = SegmentInfo> + 'track {
         AvcSegmentIterator{
             samples: self.samples.iter().peekable(),
-            max_ts: self.samples.iter().last().map(|s| s.dts )
+            max_ts: self.samples.iter().last().map(|s| s.dts ),
+            sequence_number: self.first_seg_num as u64,
         }
     }
 
@@ -249,7 +272,8 @@ struct AvcPartIterator<'track> {
 
 struct AvcSegmentIterator<'track> {
     samples: Peekable<vec_deque::Iter<'track, Sample>>,
-    max_ts: Option<i64>
+    max_ts: Option<i64>,
+    sequence_number: u64,
 }
 impl<'track> Iterator for AvcSegmentIterator<'track> {
     type Item = SegmentInfo;
@@ -275,8 +299,11 @@ impl<'track> Iterator for AvcSegmentIterator<'track> {
                             Some(peek) => {
                                 if is_idr(peek) {
                                     let duration = peek.dts - last_idr_dts;
+                                    let seq = self.sequence_number;
+                                    self.sequence_number += 1;
                                     return Some(SegmentInfo {
                                         dts: last_idr_dts,
+                                        seq,
                                         duration: Some(duration as f64 / 90000.0),
                                         continuous: true
                                     })
@@ -285,11 +312,16 @@ impl<'track> Iterator for AvcSegmentIterator<'track> {
                             // Then we don't have enough samples to announce this segment yet;
                             // we do indicate the possibility of a segment, but we don't indicate
                             // it's duration yet,
-                            None => return Some(SegmentInfo {
-                                dts: last_idr_dts,
-                                duration: None,
-                                continuous: true
-                            })
+                            None => {
+                                let seq = self.sequence_number;
+                                self.sequence_number += 1;
+                                return Some(SegmentInfo {
+                                    dts: last_idr_dts,
+                                    seq,
+                                    duration: None,
+                                    continuous: true
+                                })
+                            }
                         }
                     }
                 },
@@ -315,6 +347,7 @@ pub struct AacTrack {
     channel_config: adts_reader::ChannelConfiguration,
     max_bitrate: Option<u32>,
     watch: (watch::Sender<TrackSequence>, watch::Receiver<TrackSequence>),
+    first_seg_num: usize,
 }
 impl AacTrack {
     pub const AUDIO_FRAMES_PER_PART: usize = 15;  // TODO
@@ -332,12 +365,32 @@ impl AacTrack {
             channel_config,
             max_bitrate,
             watch: watch::channel(TrackSequence::default()),
+            first_seg_num: 0,
         }
     }
 
     pub fn push(&mut self, sample: Sample) {
         self.samples.push_back(sample);
-        // TODO: remove old samples
+        while self.duration() > ARCHIVE_LIMIT {
+            self.remove_one_segment()
+        }
+        // TODO: notify clients performing blocking playlist reload
+    }
+
+    fn remove_one_segment(&mut self) {
+        for _ in 0..Self::AAC_SAMPLES_PER_SEGMENT {
+            self.samples.pop_front();
+        }
+        self.first_seg_num += 1;
+    }
+
+    fn duration(&self) -> u64 {
+        let len = self.samples.len();
+        if len < 2 {
+            0
+        } else {
+            (self.samples[len - 1].dts - self.samples[0].dts) as u64
+        }
     }
 
     pub fn channels(&self) -> Option<u32> {
@@ -404,7 +457,7 @@ impl AacTrack {
         self.segments()
             .enumerate()
             .find(|(i, seg)| seg.dts == dts)
-            .map(|(i, _)| i )
+            .map(|(i, _)| i + self.first_seg_num )
     }
 
     pub fn part_number_for(&self, dts: i64, part_id: u64) -> Option<usize> {
@@ -431,21 +484,24 @@ impl AacTrack {
         // TODO: expose partial segment (duration:None)
         let limit = self.samples.len() / Self::AAC_SAMPLES_PER_SEGMENT;
 
+        let seg_num = self.first_seg_num;
         self.samples
             .iter()
             .enumerate()
             .group_by(|(i, _)| i / Self::AAC_SAMPLES_PER_SEGMENT )
             .into_iter()
-            .map(|(key, group)| {  // TODO: can we avoid allocating for 'group'?
+            .map(move |(key, group)| {  // TODO: can we avoid allocating for 'group'?
                 if group.len() == Self::AAC_SAMPLES_PER_SEGMENT {
                     SegmentInfo {
                         dts: group[0].1.dts,
+                        seq: key as u64 + seg_num as u64,
                         duration: Some(AAC_SEGMENT_DURATION),
                         continuous: true, // TODO check for timing gaps etc.
                     }
                 } else {
                     SegmentInfo {
                         dts: group[0].1.dts,
+                        seq: key as u64 + seg_num as u64,
                         duration: None,
                         continuous: true, // TODO check for timing gaps etc.
                     }
@@ -489,6 +545,7 @@ impl AacTrack {
 
 pub struct SegmentInfo {
     dts: i64,
+    seq: u64,
     duration: Option<f64>,
     continuous: bool,
 }
@@ -501,6 +558,9 @@ impl SegmentInfo {
     }
     pub fn is_continuous(&self) -> bool {
         self.continuous
+    }
+    pub fn sequence_number(&self) -> u64 {
+        self.seq
     }
 }
 

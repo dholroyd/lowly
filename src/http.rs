@@ -313,7 +313,14 @@ impl HlsService {
                 writeln!(text,
                          "#EXT-X-MAP:URI=\"init.mp4\"")
                     .unwrap();
-                // TODO: EXT-X-MEDIA-SEQUENCE
+                if let Some(first) = avc_track.segments().nth(0) {
+                    if first.sequence_number() > 0 {
+                        writeln!(text,
+                                 "#EXT-X-MEDIA-SEQUENCE:{}",
+                                 first.sequence_number())
+                            .unwrap();
+                    }
+                }
                 for seg in avc_track.segments() {
                     if !seg.is_continuous() {
                         writeln!(text, "#EXT-X-DISCONTINUITY").unwrap();
@@ -341,7 +348,14 @@ impl HlsService {
                 writeln!(text,
                          "#EXT-X-MAP:URI=\"init.mp4\"")
                     .unwrap();
-                // TODO: EXT-X-MEDIA-SEQUENCE
+                if let Some(first) = aac_track.segments().nth(0) {
+                    if first.sequence_number() > 0 {
+                        writeln!(text,
+                                 "#EXT-X-MEDIA-SEQUENCE:{}",
+                                 first.sequence_number())
+                            .unwrap();
+                    }
+                }
                 for seg in aac_track.segments() {
                     if !seg.is_continuous() {
                         writeln!(text, "#EXT-X-DISCONTINUITY").unwrap();
