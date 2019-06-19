@@ -207,14 +207,9 @@ impl AvcTrack {
     }
 
     pub fn parts<'track>(&'track self, dts: i64) -> Result<impl Iterator<Item = PartInfo> + 'track, SegmentError> {
-        // TODO: this should be,
-        //  a) in terms of duration, not samples
-        //  b) configured, not hardcoded
-        const VIDEO_SAMPLES_PER_PART: usize = 8;
-
         Ok(self.segment_samples(dts)?
             .enumerate()
-            .group_by(|(i, _)| i / VIDEO_SAMPLES_PER_PART )
+            .group_by(|(i, _)| i / Self::VIDEO_SAMPLES_PER_PART )
             .into_iter()
             .map(|(key, group)| {  // TODO: can we avoid allocating for 'group'?
                 // now, check that we have all the samples needed for a complete part, and remember
@@ -224,7 +219,7 @@ impl AvcTrack {
                     .iter()
                     .map(|(_, s)| s )
                     .fold((0, false), |(count, idr), sample| (count+1, idr | is_idr(sample)) );
-                if count == VIDEO_SAMPLES_PER_PART {
+                if count == Self::VIDEO_SAMPLES_PER_PART {
                     Some(PartInfo {
                         part_id: key as u64,
                         duration: Some(0.32),  // TODO: don't hardcode
