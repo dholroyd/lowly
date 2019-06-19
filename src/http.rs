@@ -848,7 +848,7 @@ impl HlsService {
         let mut avc_timestamps = Vec::new();
         let mut avc_timestamp_offset = 0;
 
-        for sample in avc_track.segment_samples(dts)?.skip(offset).take(limit) {
+        for sample in avc_track.segment_samples(dts)?.skip(offset * store::AvcTrack::VIDEO_SAMPLES_PER_PART).take(limit) {
             let i = avc_timestamps.len();
             let mut timestamp = sample.pts;
             if i == 0 {
@@ -952,7 +952,7 @@ impl HlsService {
         let mut aac_timestamps = Vec::new();
         let mut aac_timestamp_offset = 0;
 
-        for sample in avc_track.segment_samples(dts).skip(offset).take(limit) {
+        for sample in avc_track.segment_samples(dts).skip(offset * store::AacTrack::AUDIO_FRAMES_PER_PART).take(limit) {
             let i = aac_timestamps.len();
             let mut timestamp = sample.pts;
             if i == 0 {
