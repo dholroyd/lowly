@@ -750,7 +750,7 @@ impl HlsService {
     }
 */
     fn make_avc_segment(avc_track: &store::AvcTrack, dts: i64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
-        let avc_stream = Self::create_avc_stream(avc_track, dts, 0, std::usize::MAX).unwrap(); // TODO
+        let (initial_dts, avc_stream) = Self::create_avc_stream(avc_track, dts, 0, std::usize::MAX).unwrap(); // TODO
 
         let mut segment = fmp4::MediaSegment::default();
         if let Some(seq) = avc_track.segment_number_for(dts) {
@@ -759,7 +759,7 @@ impl HlsService {
 
         // video traf
         let mut traf = fmp4::TrackFragmentBox::new(true);
-        traf.tfdt_box.base_media_decode_time = dts as u32;
+        traf.tfdt_box.base_media_decode_time = initial_dts as u32;
         traf.tfhd_box.default_sample_flags = Some(fmp4::SampleFlags {
             is_leading: 0,
             sample_depends_on: 1,
@@ -795,7 +795,7 @@ impl HlsService {
     }
 
     fn make_avc_part(avc_track: &store::AvcTrack, dts: i64, part_id: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
-        let avc_stream = Self::create_avc_stream(avc_track, dts, part_id as usize, store::AvcTrack::VIDEO_SAMPLES_PER_PART).unwrap(); // TODO
+        let (initial_dts, avc_stream) = Self::create_avc_stream(avc_track, dts, part_id as usize, store::AvcTrack::VIDEO_SAMPLES_PER_PART).unwrap(); // TODO
 
         let mut segment = fmp4::MediaSegment::default();
         if let Some(seq) = avc_track.part_number_for(dts, part_id) {
@@ -804,7 +804,7 @@ impl HlsService {
 
         // video traf
         let mut traf = fmp4::TrackFragmentBox::new(true);
-        traf.tfdt_box.base_media_decode_time = dts as u32;
+        traf.tfdt_box.base_media_decode_time = initial_dts as u32;
         traf.tfhd_box.default_sample_flags = Some(fmp4::SampleFlags {
             is_leading: 0,
             sample_depends_on: 1,
@@ -840,7 +840,7 @@ impl HlsService {
     }
 
     // reformat the data into the form accepted by the mse_fmp4 crate
-    fn create_avc_stream(avc_track: &store::AvcTrack, dts: i64, offset: usize, limit: usize) -> Result<AvcStream, store::SegmentError> {
+    fn create_avc_stream(avc_track: &store::AvcTrack, dts: i64, offset: usize, limit: usize) -> Result<(u64, AvcStream), store::SegmentError> {
         let mut avc_stream = AvcStream {
             samples: vec![],
             data: vec![]
@@ -887,11 +887,11 @@ impl HlsService {
             avc_stream.samples[0].duration = Some(3600);
         }
 
-        Ok(avc_stream)
+        Ok((avc_timestamp_offset as u64, avc_stream))
     }
 
     fn make_aac_segment(aac_track: &store::AacTrack, dts: i64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
-        let aac_stream = Self::create_aac_stream(aac_track, dts, 0, std::usize::MAX).unwrap();
+        let (initial_dts, aac_stream) = Self::create_aac_stream(aac_track, dts, 0, std::usize::MAX).unwrap();
 
         let mut segment = fmp4::MediaSegment::default();
         if let Some(seq) = aac_track.segment_number_for(dts) {
@@ -899,7 +899,7 @@ impl HlsService {
         }
 
         let mut traf = fmp4::TrackFragmentBox::new(false);
-        traf.tfdt_box.base_media_decode_time = dts as u32;
+        traf.tfdt_box.base_media_decode_time = initial_dts as u32;
         traf.tfhd_box.default_sample_duration = Some(aac::SAMPLES_IN_FRAME as u32);
         traf.trun_box.data_offset = Some(0); // dummy
         traf.trun_box.samples = aac_stream.samples;
@@ -918,7 +918,7 @@ impl HlsService {
     }
 
     fn make_aac_part(aac_track: &store::AacTrack, dts: i64, part_id: u64) -> Result<fmp4::MediaSegment, mse_fmp4::Error> {
-        let aac_stream = Self::create_aac_stream(aac_track, dts, part_id as usize, store::AacTrack::AUDIO_FRAMES_PER_PART).unwrap(); // TODO
+        let (initial_dts, aac_stream) = Self::create_aac_stream(aac_track, dts, part_id as usize, store::AacTrack::AUDIO_FRAMES_PER_PART).unwrap(); // TODO
 
         let mut segment = fmp4::MediaSegment::default();
         if let Some(seq) = aac_track.part_number_for(dts, part_id) {
@@ -926,7 +926,7 @@ impl HlsService {
         }
 
         let mut traf = fmp4::TrackFragmentBox::new(false);
-        traf.tfdt_box.base_media_decode_time = dts as u32;
+        traf.tfdt_box.base_media_decode_time = initial_dts as u32;
         traf.tfhd_box.default_sample_duration = Some(aac::SAMPLES_IN_FRAME as u32);
         traf.trun_box.data_offset = Some(0); // dummy
         traf.trun_box.samples = aac_stream.samples;
@@ -944,7 +944,7 @@ impl HlsService {
         Ok(segment)
     }
 
-    fn create_aac_stream(avc_track: &store::AacTrack, dts: i64, offset: usize, limit: usize) -> Result<AacStream, SegmentError> {
+    fn create_aac_stream(avc_track: &store::AacTrack, dts: i64, offset: usize, limit: usize) -> Result<(u64, AacStream), SegmentError> {
         let mut aac_stream = AacStream {
             samples: vec![],
             data: vec![]
@@ -978,7 +978,7 @@ impl HlsService {
             });
         }
 
-        Ok(aac_stream)
+        Ok((aac_timestamp_offset as u64, aac_stream))
     }
 }
 impl futures::IntoFuture for HlsService {
