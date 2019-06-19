@@ -117,7 +117,7 @@ impl UnwrapTimestamp {
         if let Some (last) = self.last {
             let half = (Timestamp::MAX.value() / 2) as i64;
             let diff = ts.value() as i64 - last.value() as i64;
-            if diff < -(half as i64) {
+            if diff < -half {
                 self.carry += (Timestamp::MAX.value() + 1);
             }
         }
