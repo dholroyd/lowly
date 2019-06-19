@@ -374,7 +374,15 @@ impl AacTrack {
         while self.duration() > ARCHIVE_LIMIT {
             self.remove_one_segment()
         }
-        // TODO: notify clients performing blocking playlist reload
+        // TODO: pretty inefficient!
+        if let Some((this_msn, this_seg)) = self.segments().enumerate().last() {
+            let this_part = self.parts(this_seg.id()).unwrap().count() - 1;
+            let seq = TrackSequence {
+                seg: this_msn as u64 + self.first_seg_num as u64,
+                part: this_part as u16,
+            };
+            self.watch.0.broadcast(seq).unwrap()
+        }
     }
 
     fn remove_one_segment(&mut self) {
