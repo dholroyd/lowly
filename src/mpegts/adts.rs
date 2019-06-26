@@ -109,6 +109,7 @@ impl pes::ElementaryStreamConsumer for AdtsElementaryStreamConsumer {
                     Ok(pes::PtsDts::Both{pts:Ok(pts), dts:Ok(dts)}) => self.parser.consumer.set_pts_dts(Some(pts), Some(dts)),
                     _ => self.parser.consumer.set_pts_dts(None, None),
                 }
+                self.parser.start();
                 self.parser.push(parsed.payload());
             },
             pes::PesContents::Parsed(None) => println!("ADTS: Parsed(None)"),
