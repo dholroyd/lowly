@@ -483,10 +483,6 @@ impl AacTrack {
     pub fn segments<'track>(&'track self) -> impl Iterator<Item = SegmentInfo> + 'track {
         const AAC_SEGMENT_DURATION: f64 = 1.92;  // TODO: can't be hardcoded
 
-        // apply a limit so as to avoid the last segment being announced while incomplete
-        // TODO: expose partial segment (duration:None)
-        let limit = self.samples.len() / Self::AAC_SAMPLES_PER_SEGMENT;
-
         let seg_num = self.first_seg_num;
         self.samples
             .iter()
