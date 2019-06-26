@@ -287,7 +287,7 @@ impl HlsService {
                                 store::Track::Avc(ref avc_track) => avc_track.segments().nth(seq.seg as usize),
                                 store::Track::Aac(ref aac_track) => aac_track.segments().nth(seq.seg as usize),
                             }.unwrap();
-                            b.header("Link", format!("<segment/{}/part/{}.mp4>; rel=preload; as=video; type=video/mp4", segment.id(), part));
+                            b.header("Link", format!("</track/{}/segment/{}/part/{}.mp4>; rel=preload; as=video; type=video/mp4", id.0, segment.id(), part));
                         }
                         // TODO: push segment if no part was requested?
                     }
