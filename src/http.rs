@@ -269,7 +269,8 @@ impl HlsService {
         };
         let mut store = store.clone();
         seq_stream
-            .skip_while(move |seq| future::ok(seq.seg < msn && req.part.map(|p| seq.part < p ).unwrap_or(true) ))
+            .skip_while(move |seq| future::ok(seq.seg < msn) )
+            .skip_while(move |seq| future::ok(seq.seg == msn && req.part.map(|p| seq.part < p ).unwrap_or(false)) )
             .into_future()
             .map_err(|(e, _stream)| panic!("Unexpected watch error {:?}", e) )
             .and_then(move |(seq, _stream)| {
