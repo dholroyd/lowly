@@ -237,10 +237,10 @@ impl HlsService {
             };
             if request_msn > current_msn + 1 {
                 // per the spec, return HTTP 400 error response
-
+                println!("Sequence number {} requested too early ({} + {})", request_msn, current_msn, request_msn - current_msn);
                 return Either::A(futures::future::ok(Response::builder()
                     .status(StatusCode::BAD_REQUEST)
-                    .body(Body::from("Sequence number requested too early"))
+                    .body(Body::from(format!("Sequence number {} requested too early ({} + {})", request_msn, current_msn, request_msn - current_msn)))
                     .unwrap()))
             }
             if request_msn == current_msn + 1 {
@@ -282,11 +282,12 @@ impl HlsService {
                 if let Some(seq) = seq {
                     if req.push.map(|p| p > 0).unwrap_or(false) {
                         if let Some(part) = req.part {
-                            let mut track_ref = store.get_track(id).unwrap();
+                            let mut track_ref = store.get_track(id).expect("TODO: get_track()");
+                            // jump through some hoops to map from the segment number to its timestamp
                             let segment = match track_ref.track() {
                                 store::Track::Avc(ref avc_track) => avc_track.segments().nth(seq.seg as usize),
                                 store::Track::Aac(ref aac_track) => aac_track.segments().nth(seq.seg as usize),
-                            }.unwrap();
+                            }.unwrap_or_else(|| panic!("Couldn't get segment #{} of track {:?}", seq.seg, id) );
                             b.header("Link", format!("</track/{}/segment/{}/part/{}.mp4>; rel=preload; as=video; type=video/mp4", id.0, segment.id(), part));
                         }
                         // TODO: push segment if no part was requested?
