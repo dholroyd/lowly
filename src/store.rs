@@ -73,13 +73,22 @@ impl AvcTrack {
     pub fn push(&mut self, sample: Sample) {
         self.samples.push_back(sample);
         // TODO: pretty inefficient!
-        if let Some((this_msn, this_seg)) = self.segments().enumerate().last() {
-            let this_part = self.parts(this_seg.id()).unwrap().count() - 1;
-            let seq = TrackSequence {
-                seg: this_msn as u64 + self.first_seg_num as u64,
-                part: this_part as u16,
-            };
-            self.watch.0.broadcast(seq).unwrap()
+        if let Some(this_seg) = self.segments().last() {
+            let parts = self.parts(this_seg.id());
+            if let Err(e) = parts {
+                // How is this even possible?
+                println!("Problem trying to get parts for segment {:?}: {:?}", this_seg, e);
+            } else {
+                let count = parts.unwrap().count();
+                if count > 0 {
+                    let this_part_num = count - 1;
+                    let seq = TrackSequence {
+                        seg: this_seg.sequence_number(),
+                        part: this_part_num as u16,
+                    };
+                    self.watch.0.broadcast(seq).unwrap()
+                }
+            }
         }
         while self.duration() > ARCHIVE_LIMIT {
             self.remove_one_segment();
@@ -370,13 +379,16 @@ impl AacTrack {
             self.remove_one_segment()
         }
         // TODO: pretty inefficient!
-        if let Some((this_msn, this_seg)) = self.segments().enumerate().last() {
-            let this_part = self.parts(this_seg.id()).unwrap().count() - 1;
-            let seq = TrackSequence {
-                seg: this_msn as u64 + self.first_seg_num as u64,
-                part: this_part as u16,
-            };
-            self.watch.0.broadcast(seq).unwrap()
+        if let Some(this_seg) = self.segments().last() {
+            let count = self.parts(this_seg.id()).unwrap().count();
+            if count > 0 {
+                let this_part = count - 1;
+                let seq = TrackSequence {
+                    seg: this_seg.sequence_number(),
+                    part: this_part as u16,
+                };
+                self.watch.0.broadcast(seq).unwrap()
+            }
         }
     }
 
