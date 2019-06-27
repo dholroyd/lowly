@@ -188,7 +188,7 @@ impl AvcTrack {
     }
 
     pub fn media_sequence_number(&self) -> u64 {
-        self.segments().count() as u64
+        self.segments().filter(|s| s.duration.is_some() ).count() as u64
     }
 
     // TODO: this should be,
@@ -509,7 +509,7 @@ impl AacTrack {
     }
 
     pub fn media_sequence_number(&self) -> u64 {
-        self.segments().count() as u64
+        self.segments().filter(|s| s.duration.is_some() ).count() as u64
     }
 
     pub fn sample(&self, dts: i64) -> Option<&Sample> {
