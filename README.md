@@ -52,7 +52,7 @@ General HLS features,
  - [ ] No SCTE signalling
  - [ ] No language code signalling (planned via `language_descriptor` metadata in input)
  - [ ] No `EXT-X-DISCONTINUITY` signalling (if the input has a discontinuity, the output will be invalid HLS)
- - [ ] No `EXT-X-PROGRAM-DATE-TIME` (planned via AVC `pic_timing` metadata)
+ - [x] `EXT-X-PROGRAM-DATE-TIME` (if AVC `pic_timing` metadata is in the source stream)
  - [ ] No `EXT-X-I-FRAME-STREAM-INF` / `EXT-X-I-FRAMES-ONLY`
  - [ ] No DRM
  - [ ] No `EXT-X-ENDLIST` (there's currently no way to end the stream)

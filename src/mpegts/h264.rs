@@ -7,6 +7,8 @@ use h264_reader::nal::{NalHeader, NalHandler};
 use h264_reader::rbsp::RbspDecoder;
 use std::collections::HashMap;
 use h264_reader::nal::pps::ParamSetId;
+use std::time::{SystemTime, SystemTimeError, Duration};
+use mpeg2ts_reader::pes::Timestamp;
 
 enum SliceType {
     Idr,
@@ -102,13 +104,83 @@ impl NalHandler for NalCapture {
     }
 }
 
-#[derive(Default)]
-struct PicTimingDump;
-impl nal::sei::pic_timing::PicTimingHandler for PicTimingDump {
+struct DateTime {
+    date: u64,
+    time_of_day_micros: u64,
+}
+impl DateTime {
+    const DAY_SECONDS: u64 = 24 * 60 * 60;
+    const DAY_MICROS: u64 = Self::DAY_SECONDS * 1_000_000;
+
+    pub fn now() -> Result<DateTime, SystemTimeError> {
+        // TODO: as usual, leap-seconds mess everything up; consider option for pic_timing to align with PTP time
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+        Ok(DateTime {
+            date: now.as_secs() / Self::DAY_SECONDS,
+            time_of_day_micros: (now.as_secs() % Self::DAY_SECONDS) * 1_000_000 + now.subsec_micros() as u64,
+        })
+    }
+}
+
+struct PicTimingIngest {
+    local_time_datum: Option<DateTime>,
+    /// in 90-thousandths of a second (mpegts timebase)
+    pts_to_utc_offset: i64,
+}
+impl Default for PicTimingIngest {
+    fn default() -> Self {
+        PicTimingIngest {
+            local_time_datum: None,
+            pts_to_utc_offset: 0,
+        }
+    }
+}
+impl PicTimingIngest {
+    pub fn adjust_pts_to_utc(&self, pts_dts: i64) -> i64 {
+        self.pts_to_utc_offset + pts_dts
+    }
+}
+impl nal::sei::pic_timing::PicTimingHandler for PicTimingIngest {
     type Ctx = IngestH264Context;
 
     fn handle(&mut self, ctx: &mut h264_reader::Context<Self::Ctx>, pic_timing: nal::sei::pic_timing::PicTiming) {
-        //println!("{:#?}", pic_timing);
+        // Ordering: this depends on the PTS for this frame having already been
+        // placed into the context by H264ElementaryStreamConsumer
+        const FRAME_RATE: u64 = 25;
+        if let Some(pic_struct) = pic_timing.pic_struct {
+            if !pic_struct.clock_timestamps.is_empty() {
+                if let Some(ref clock_timestamp) = pic_struct.clock_timestamps[0] {
+                    let time_of_day_micros = (
+                        (
+                            (
+                                (
+                                    clock_timestamp.smh.hours() as u64
+                                ) * 60 + clock_timestamp.smh.minutes() as u64
+                            ) * 60 + clock_timestamp.smh.seconds() as u64
+                        ) * FRAME_RATE + clock_timestamp.n_frames as u64
+                    ) * 1_000_000 / FRAME_RATE;
+
+                    let date_time = DateTime::now().unwrap(/*TODO*/);
+                    let time_diff = date_time.time_of_day_micros as i64 - time_of_day_micros as i64;
+                    let date_part = if time_diff < -(DateTime::DAY_MICROS as i64 / 2) {
+                        date_time.date + 1
+                    } else if time_diff > DateTime::DAY_MICROS as i64 / 2 {
+                        date_time.date - 1
+                    } else {
+                        date_time.date
+                    };
+                    if let Some(pts) = ctx.user_context.last_pts.or_else(|| ctx.user_context.last_dts ) {
+                        // Convert local time to the media timebase (going the other way around
+                        // might risk introducing a small amount of error into results)
+                        let local_converted = date_time.date * DateTime::DAY_SECONDS * Timestamp::TIMEBASE
+                            + time_of_day_micros * Timestamp::TIMEBASE / 1_000_000;
+                        let pts_to_datetime = local_converted as i64 - pts;
+                        ctx.user_context.store.set_pts_to_utc(pts_to_datetime);
+                        //println!("pts_to_datetime {}", pts_to_datetime);
+                    }
+                }
+            }
+        }
     }
 }
 h264_reader::sei_switch!{
@@ -117,8 +189,8 @@ h264_reader::sei_switch!{
         //    => h264_reader::nal::sei::buffering_period::BufferingPeriodPayloadReader::new(),
         //UserDataRegisteredItuTT35: h264_reader::nal::sei::user_data_registered_itu_t_t35::UserDataRegisteredItuTT35Reader<TT35Switch>
         //    => h264_reader::nal::sei::user_data_registered_itu_t_t35::UserDataRegisteredItuTT35Reader::new(TT35Switch::default()),
-        PicTiming: h264_reader::nal::sei::pic_timing::PicTimingReader<PicTimingDump>
-            => h264_reader::nal::sei::pic_timing::PicTimingReader::new(PicTimingDump::default()),
+        PicTiming: h264_reader::nal::sei::pic_timing::PicTimingReader<PicTimingIngest>
+            => h264_reader::nal::sei::pic_timing::PicTimingReader::new(PicTimingIngest::default()),
     }
 }
 struct IngestSeiPayoadReader {
@@ -150,8 +222,8 @@ impl h264_reader::nal::sei::SeiIncrementalPayloadReader for IngestSeiPayoadReade
 struct IngestH264Context {
     store: store::Store,
     track_id: Option<store::TrackId>,
-    last_pts: Option<pes::Timestamp>,
-    last_dts: Option<pes::Timestamp>,
+    last_pts: Option<i64>,
+    last_dts: Option<i64>,
     sps_bytes: HashMap<nal::pps::ParamSetId, Vec<u8>>,
     pps_bytes: HashMap<nal::pps::ParamSetId, Vec<u8>>,
     max_bitrate: Option<u32>,
@@ -172,16 +244,24 @@ impl IngestH264Context {
     }
 
     fn set_pts_dts(&mut self, pts: Option<pes::Timestamp>, dts: Option<pes::Timestamp>) {
-        if let (Some(last_pts), Some(pts)) = (self.last_pts, pts) {
-            if pts.likely_wrapped_since(last_pts) {
-                eprint!("Oh no!  PTS wrap!");
+        let (dts, pts) = if let Some(dts) = dts {
+            self.unwrap_ts.update(dts);
+            (
+                Some(self.unwrap_ts.unwrap(dts)),
+                pts.map(|pts| self.unwrap_ts.unwrap(pts)),
+            )
+        } else {
+            if let Some(pts) = pts {
+                self.unwrap_ts.update(pts);
+                let pts = self.unwrap_ts.unwrap(pts);
+                (
+                    None,
+                    Some(pts),
+                )
+            } else {
+                (None, None)
             }
-        }
-        if let (Some(last_dts), Some(dts)) = (self.last_dts, dts) {
-            if dts.likely_wrapped_since(last_dts) {
-                eprint!("Oh no!  DTS wrap!");
-            }
-        }
+        };
         self.last_pts = pts;
         self.last_dts = dts;
     }
@@ -203,15 +283,12 @@ impl IngestH264Context {
             tid
         };
         let (dts, pts) = if let Some(dts) = self.last_dts {
-            self.unwrap_ts.update(dts);
             (
-                self.unwrap_ts.unwrap(dts),
-                self.last_pts.map(|pts| self.unwrap_ts.unwrap(pts)).unwrap_or(0),
+                dts,
+                self.last_pts.unwrap_or(0),
             )
         } else {
             if let Some(pts) = self.last_pts {
-                self.unwrap_ts.update(pts);
-                let pts = self.unwrap_ts.unwrap(pts);
                 (
                     pts,
                     pts,

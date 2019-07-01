@@ -25,7 +25,8 @@ pub enum SampleHeader {
 
 #[derive(Debug)]
 pub enum SegmentError {
-    BadSampleTime(i64),
+    NotAnIdrSample(i64),
+    SampleNotFound(i64),
     /// Tried to inspect segment information, but no segments exist within the track (yet)
     NoSegments,
     /// Tried to inspect the parts for a segment, but the segment does not have any parts (hls
@@ -96,7 +97,7 @@ impl AvcTrack {
     }
     fn remove_one_segment(&mut self) {
         let mut i = 0;
-        while i == 0 || !is_idr(&self.samples[0]) {
+        while i == 0 || (!self.samples.is_empty() && !is_idr(&self.samples[0])) {
             self.samples.pop_front();
             i += 1;
         }
@@ -156,10 +157,13 @@ impl AvcTrack {
             if sample.dts == dts && is_idr(sample) {
                 Ok(iter)
             } else {
-                Err(SegmentError::BadSampleTime(dts))
+                if sample.dts != dts {
+                    println!("segment_samples({}) gor first sample with dts {}?!?", dts, sample.dts);
+                }
+                Err(SegmentError::NotAnIdrSample(dts))
             }
         } else {
-            Err(SegmentError::BadSampleTime(dts))
+            Err(SegmentError::SampleNotFound(dts))
         }
     }
 
@@ -554,6 +558,7 @@ impl AacTrack {
     }
 }
 
+#[derive(Debug)]
 pub struct SegmentInfo {
     dts: i64,
     seq: u64,
@@ -615,6 +620,7 @@ pub enum Track {
 #[derive(Default)]
 struct State {
     tracks: Vec<Track>,
+    pts_to_utc: Option<i64>
 }
 
 pub struct TrackInfo {
@@ -654,6 +660,16 @@ impl Store {
         self.state.lock().unwrap()
     }
 
+    pub fn set_pts_to_utc(&mut self, diff: i64) {
+        let mut state = self.get_state_mut();
+        state.pts_to_utc = Some(diff);
+    }
+
+    pub fn has_pts_to_utc(&mut self) -> bool {
+        let state = self.get_state_mut();
+        state.pts_to_utc.is_some()
+    }
+
     pub fn allocate_avc_track(
         &mut self,
         sps: nal::sps::SeqParameterSet,
@@ -669,8 +685,12 @@ impl Store {
         id
     }
 
-    pub fn add_avc_sample(&mut self, track_id: TrackId, sample: Sample) {
+    pub fn add_avc_sample(&mut self, track_id: TrackId, mut sample: Sample) {
         let mut state = self.get_state_mut();
+        if let Some(diff) = state.pts_to_utc {
+            sample.dts += diff;
+            sample.pts += diff;
+        }
         if let Track::Avc(ref mut track) = state.tracks[track_id.0] {
             track.push(sample);
         } else {
@@ -678,8 +698,12 @@ impl Store {
         }
     }
 
-    pub fn add_aac_sample(&mut self, track_id: TrackId, sample: Sample) {
+    pub fn add_aac_sample(&mut self, track_id: TrackId, mut sample: Sample) {
         let mut state = self.get_state_mut();
+        if let Some(diff) = state.pts_to_utc {
+            sample.dts += diff;
+            sample.pts += diff;
+        }
         if let Track::Aac(ref mut track) = state.tracks[track_id.0] {
             track.push(sample);
         } else {

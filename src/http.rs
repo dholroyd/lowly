@@ -15,6 +15,7 @@ use byteorder::WriteBytesExt;
 use url::Url;
 use futures::stream::Stream;
 use crate::store::SegmentError;
+use chrono::offset::TimeZone;
 
 type ImmediateFut = future::FutureResult<Response<Body>, HlsServiceError>;
 type MediaManifestFut = Box<dyn Future<Item=Response<Body>, Error=HlsServiceError> + Send>;
@@ -248,8 +249,9 @@ impl HlsService {
                 return Either::B(Box::new(Self::block_for_media_manifest(store, id, hls_request)));
             }
         }
+        let has_pts_to_utc = store.has_pts_to_utc();
         let mut track_ref = store.get_track(id).unwrap();
-        let text = Self::render_media_manifest(track_ref);
+        let text = Self::render_media_manifest(has_pts_to_utc, track_ref);
 
         Either::A(futures::future::ok(Response::builder()
             .header("Content-Type", "application/vnd.apple.mpegurl")
@@ -274,8 +276,9 @@ impl HlsService {
             .into_future()
             .map_err(|(e, _stream)| panic!("Unexpected watch error {:?}", e) )
             .and_then(move |(seq, _stream)| {
+                let has_pts_to_utc = store.has_pts_to_utc();
                 let mut track_ref = store.get_track(id).unwrap();
-                let text = Self::render_media_manifest(track_ref);
+                let text = Self::render_media_manifest(has_pts_to_utc, track_ref);
                 let mut b = Response::builder();
                 b.header("Content-Type", "application/vnd.apple.mpegurl");
                 b.header("Access-Control-Allow-Origin", "*");
@@ -285,8 +288,8 @@ impl HlsService {
                             let mut track_ref = store.get_track(id).expect("TODO: get_track()");
                             // jump through some hoops to map from the segment number to its timestamp
                             let segment = match track_ref.track() {
-                                store::Track::Avc(ref avc_track) => avc_track.segments().nth(seq.seg as usize),
-                                store::Track::Aac(ref aac_track) => aac_track.segments().nth(seq.seg as usize),
+                                store::Track::Avc(ref avc_track) => avc_track.segments().find(|s| s.sequence_number() == seq.seg ),
+                                store::Track::Aac(ref aac_track) => aac_track.segments().find(|s| s.sequence_number() == seq.seg ),
                             }.unwrap_or_else(|| panic!("Couldn't get segment #{} of track {:?}", seq.seg, id) );
                             b.header("Link", format!("</track/{}/segment/{}/part/{}.mp4>; rel=preload; as=video; type=video/mp4", id.0, segment.id(), part));
                         }
@@ -297,7 +300,7 @@ impl HlsService {
             })
     }
 
-    fn render_media_manifest(track_ref: store::TrackRef) -> String {
+    fn render_media_manifest(has_pts_to_utc: bool, track_ref: store::TrackRef) -> String {
         let mut text = String::new();
         writeln!(text, "#EXTM3U").unwrap();
         // TODO: validate correct version vs. used HLS features
@@ -321,6 +324,12 @@ impl HlsService {
                                  "#EXT-X-MEDIA-SEQUENCE:{}",
                                  first.sequence_number())
                             .unwrap();
+                    }
+                    if has_pts_to_utc {
+                        let utc_millis = first.id() * 1_000 / Timestamp::TIMEBASE as i64;
+                        let date_time = chrono::Utc.timestamp_millis(utc_millis);
+
+                        writeln!(text, "#EXT-X-PROGRAM-DATE-TIME:{}", date_time.format("%Y-%m-%dT%H:%M:%S%.3fZ")).unwrap();
                     }
                 }
                 for seg in avc_track.segments() {
@@ -356,6 +365,12 @@ impl HlsService {
                                  "#EXT-X-MEDIA-SEQUENCE:{}",
                                  first.sequence_number())
                             .unwrap();
+                    }
+                    if has_pts_to_utc {
+                        let utc_millis = first.id() * 1_000 / Timestamp::TIMEBASE as i64;
+                        let date_time = chrono::Utc.timestamp_millis(utc_millis);
+
+                        writeln!(text, "#EXT-X-PROGRAM-DATE-TIME:{}", date_time.format("%Y-%m-%dT%H:%M:%S%.3fZ")).unwrap();
                     }
                 }
                 for seg in aac_track.segments() {
