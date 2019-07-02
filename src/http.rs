@@ -31,9 +31,7 @@ impl Service for HlsService {
 
     fn call(&mut self, req: Request<Self::ReqBody>) -> Self::Future {
         let path = req.uri().path();
-        if path == "/stream.html" {
-            Either::A(self.stream_html(req))
-        } else if path.starts_with("/master.m3u8") {
+        if path.starts_with("/master.m3u8") {
             Either::A(self.master_manifest(req))
         } else if path.starts_with("/track/") {
             let mut parts = path["/track/".len()..].splitn(2, "/");
@@ -60,29 +58,6 @@ impl Service for HlsService {
 
 
 impl HlsService {
-
-    fn stream_html(&mut self, req: Request<Body>) -> ImmediateFut {
-        let mut text = String::new();
-        text.write_str("<html><body>\n").unwrap();
-        text.write_str("<h1>Stream info</h1>\n").unwrap();
-        text.write_str("<h2>Playback</h2>\n").unwrap();
-        text.write_str("<p><a href=\"master.m3u8\">master.m3u8</a></p>\n").unwrap();
-        text.write_str("<h2>Track list</h2>\n").unwrap();
-        if self.store.track_list().count() == 0 {
-            text.write_str("<p><em>No tracks!</em></p>\n").unwrap();
-        } else {
-            text.write_str("<ul>\n").unwrap();
-            for track in self.store.track_list() {
-                writeln!(text, "<li><a href=\"track/{track_id}/track.html\">Track {track_id}</a></li>", track_id = track.track_id.0).unwrap();
-            }
-            text.write_str("</ul>\n").unwrap();
-        }
-        text.write_str("</body></html>\n").unwrap();
-        futures::future::ok(Response::builder()
-            .header("Content-Type", "text/html")
-            .body(Body::from(text))
-            .unwrap())
-    }
 
     fn master_manifest(&mut self, req: Request<Body>) -> ImmediateFut {
         let mut text = String::new();
@@ -143,9 +118,7 @@ impl HlsService {
                     .unwrap()))
             }
             if let Some(rest) = rest {
-                if "track.html" == rest {
-                    Either::A(Self::track_html(req, self.store.get_track(track_id).unwrap()))
-                } else if "media.m3u8" == rest {
+                if "media.m3u8" == rest {
                     Self::media_manifest(req, &mut self.store, track_id)
                 } else if "init.mp4" == rest {
                     Either::A(Self::initialisation_segment(req, self.store.get_track(track_id).unwrap()))
@@ -163,21 +136,6 @@ impl HlsService {
                             .body(Body::from("Need a segment id"))
                             .unwrap()))
                     }
-                } else if rest.starts_with("sample/") {
-                    let mut parts = rest["sample/".len()..].splitn(2, "/");
-                    let id = parts.next();
-                    let rest = parts.next();
-                    if let Some(id) = id {
-                        let id = id.to_string();
-                        let rest = rest.map(|s| s.to_string() );
-                        Either::A(futures::future::ok(Self::sample_html(req, self.store.get_track(track_id).unwrap(), id, rest)))
-                    } else {
-                        Either::A(futures::future::ok(Response::builder()
-                            .status(StatusCode::BAD_REQUEST)
-                            .body(Body::from("Need a sample id"))
-                            .unwrap()))
-                    }
-
                 } else {
                     Either::A(futures::future::ok(Response::builder()
                         .status(StatusCode::BAD_REQUEST)
@@ -533,124 +491,6 @@ impl HlsService {
             .push(fmp4::TrackExtendsBox::new(false));
 
         Ok(segment)
-    }
-
-    fn track_html(req: Request<Body>, track_ref: store::TrackRef) -> ImmediateFut {
-        let mut text = String::new();
-        text.write_str("<html><body>\n").unwrap();
-        writeln!(text, "<h1>Track {}</h1>", track_ref.id().0).unwrap();
-
-        let mut track_ref = track_ref;
-        match track_ref.track() {
-            store::Track::Avc(ref avc_track) => Self::avc_track_html(req, &mut text, avc_track),
-            store::Track::Aac(ref aac_track) => Self::aac_track_html(req, &mut text, aac_track),
-        }
-
-        text.write_str("</body></html>\n").unwrap();
-        futures::future::ok(Response::builder()
-            .header("Content-Type", "text/html")
-            .body(Body::from(text))
-            .unwrap())
-    }
-
-    fn avc_track_html(req: Request<Body>, text: &mut String, track: &store::AvcTrack) {
-        writeln!(text, "<h2>Sequence Parameter Set</h2>").unwrap();
-        writeln!(text, "<pre>{:#?}</pre>", track.sps()).unwrap();
-
-        writeln!(text, "<h2>Picture Parameter Set</h2>").unwrap();
-        writeln!(text, "<pre>{:#?}</pre>", track.pps()).unwrap();
-
-        writeln!(text, "<h2>Samples</h2>").unwrap();
-        writeln!(text, "<ul>").unwrap();
-        for sample in track.samples() {
-            if let store::SampleHeader::Avc(nal_header, _) = sample.header {
-                writeln!(text, "<li><a href=\"sample/{dts}/sample.html\">dts={dts}</a> pts={pts} {unit_type:?}</li>", dts = sample.dts, pts = sample.pts, unit_type = nal_header.nal_unit_type()).unwrap();
-            } else {
-                writeln!(text, "<li><a href=\"sample/{dts}/sample.html\">dts={dts}</a> pts={pts}</li>", dts = sample.dts, pts = sample.pts).unwrap();
-            }
-        }
-        writeln!(text, "</ul>").unwrap();
-    }
-
-    fn aac_track_html(req: Request<Body>, text: &mut String, track: &store::AacTrack) {
-
-        writeln!(text, "<h2>Profile</h2>").unwrap();
-        writeln!(text, "<pre>{:?}</pre>", track.profile()).unwrap();
-        writeln!(text, "<h2>Channel configuration</h2>").unwrap();
-        writeln!(text, "<pre>{:?}</pre>", track.channel_config()).unwrap();
-        writeln!(text, "<h2>Sampling Frequency</h2>").unwrap();
-        writeln!(text, "<pre>{:?}</pre>", track.frequency()).unwrap();
-
-        writeln!(text, "<h2>Samples</h2>").unwrap();
-        writeln!(text, "<ul>").unwrap();
-        for sample in track.samples() {
-            writeln!(text, "<li><a href=\"sample/{dts}/sample.html\">dts={dts}</a> pts={pts}</li>", dts = sample.dts, pts = sample.pts).unwrap();
-        }
-        writeln!(text, "</ul>").unwrap();
-    }
-
-    fn sample_html(req: Request<Body>, track_ref: store::TrackRef, sample_id: String, rest: Option<String>) -> Response<Body> {
-        let sample_dts = if let Ok(dts) = sample_id.parse() {
-            dts
-        } else {
-            return Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from("Invalid such sample id"))
-                .unwrap()
-        };
-
-        let mut text = String::new();
-        text.write_str("<html><body>\n").unwrap();
-        writeln!(text, "<h1>Track {} sample {}</h1>", track_ref.id().0, sample_dts).unwrap();
-
-        let mut track_ref = track_ref;
-        match track_ref.track() {
-            store::Track::Avc(ref avc_track) => {
-                if let Some(sample) = avc_track.sample(sample_dts) {
-                    Self::sample_detail_html(req, &mut text, sample)
-                } else {
-                    return Response::builder()
-                        .status(StatusCode::NOT_FOUND)
-                        .body(Body::from("No such sample"))
-                        .unwrap()
-                }
-            },
-            store::Track::Aac(ref aac_track) => {
-                if let Some(sample) = aac_track.sample(sample_dts) {
-                    Self::sample_detail_html(req, &mut text, sample)
-                } else {
-                    return Response::builder()
-                        .status(StatusCode::NOT_FOUND)
-                        .body(Body::from("No such sample"))
-                        .unwrap()
-                }
-            },
-        }
-
-        text.write_str("</body></html>\n").unwrap();
-        Response::builder()
-            .header("Content-Type", "text/html")
-            .body(Body::from(text))
-            .unwrap()
-    }
-
-    fn sample_detail_html(req: Request<Body>, text: &mut String, sample: &store::Sample) {
-        writeln!(text, "<dl>").unwrap();
-        writeln!(text, "<dt>Size</dt><dd>{} bytes</dd>", sample.data.len()).unwrap();
-        writeln!(text, "<dt>DTS</dt><dd>{} ticks</dd>", sample.dts).unwrap();
-        writeln!(text, "<dt>PTS</dt><dd>{} ticks</dd>", sample.pts).unwrap();
-        writeln!(text, "</dl>").unwrap();
-
-        match sample.header {
-            store::SampleHeader::Avc(ref nal_header, ref slice_header) => {
-                writeln!(text, "<h2>Slice Header</h2>").unwrap();
-                writeln!(text, "<pre>{:#?}</pre>", nal_header).unwrap();
-                writeln!(text, "<pre>{:#?}</pre>", slice_header).unwrap();
-            }
-            store::SampleHeader::Aac => {
-                // nothing yet
-            }
-        }
     }
 
     fn fmp4_segment(req: Request<Body>, track_ref: store::TrackRef, sample_id: String, rest: Option<String>) -> Response<Body> {
