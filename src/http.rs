@@ -211,9 +211,24 @@ impl HlsService {
         let mut track_ref = store.get_track(id).unwrap();
         let text = Self::render_media_manifest(has_pts_to_utc, track_ref);
 
-        Either::A(futures::future::ok(Response::builder()
-            .header("Content-Type", "application/vnd.apple.mpegurl")
-            .header("Access-Control-Allow-Origin", "*")
+        let mut b = Response::builder();
+        b.header("Content-Type", "application/vnd.apple.mpegurl");
+        b.header("Access-Control-Allow-Origin", "*");
+        if let Some(seq) = hls_request.msn {
+            if hls_request.push.map(|p| p > 0).unwrap_or(false) {
+                if let Some(part) = hls_request.part {
+                    let mut track_ref = store.get_track(id).expect("TODO: get_track()");
+                    // jump through some hoops to map from the segment number to its timestamp
+                    let segment = match track_ref.track() {
+                        store::Track::Avc(ref avc_track) => avc_track.segments().find(|s| s.sequence_number() == seq),
+                        store::Track::Aac(ref aac_track) => aac_track.segments().find(|s| s.sequence_number() == seq),
+                    }.unwrap_or_else(|| panic!("Couldn't get segment #{} of track {:?}", seq, id));
+                    b.header("Link", format!("</track/{}/segment/{}/part/{}.mp4>; rel=preload; as=video; type=video/mp4", id.0, segment.id(), part));
+                }
+                // TODO: push segment if no part was requested?
+            }
+        }
+        Either::A(futures::future::ok(b
             .body(Body::from(text))
             .unwrap()))
     }
