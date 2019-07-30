@@ -6,6 +6,8 @@ use std::iter::Peekable;
 use h264_reader::nal::UnitType;
 use itertools::Itertools;
 use tokio_sync::watch;
+use std::cmp;
+use itertools::misc::Slice;
 
 pub const SEG_DURATION_PTS: u64 = 172800;
 
@@ -348,6 +350,22 @@ fn is_idr(sample: &Sample) -> bool {
     }
 }
 
+fn binary_search_by<T, F: FnMut(&T) -> cmp::Ordering>(v: &VecDeque<T>, mut f: F) -> Result<usize, usize>  {
+    let (left, right) = v.as_slices();
+    if let Some(t) = left.last() {
+        match f(t) {
+            cmp::Ordering::Equal => Ok(left.len() - 1),
+            cmp::Ordering::Greater => left.binary_search_by(f),
+            cmp::Ordering::Less => right.binary_search_by(f).map(|i| left.len() + i ),
+        }
+    } else {
+        match right.binary_search_by(f) {
+            Ok(i) => Ok(left.len() + i),
+            Err(i) => Err(left.len() + i),
+        }
+    }
+}
+
 pub struct AacTrack {
     samples: VecDeque<Sample>,
     profile: adts_reader::AudioObjectType,
@@ -536,10 +554,16 @@ impl AacTrack {
     }
 
     pub fn segment_samples(&self, dts: i64) -> impl Iterator<Item = &Sample> {
-        // TODO: assert first sample dts exactly equals given value, and that it is_idr()
-        self.samples()
-            .skip_while(move |sample| sample.dts < dts )
-            .take(Self::AAC_SAMPLES_PER_SEGMENT)
+        // TODO: assert first sample is_idr()
+        if let Ok(idx) = binary_search_by(&self.samples, |sample| sample.dts.cmp(&dts)) {
+            self.samples()
+                .skip(idx)
+                .take(Self::AAC_SAMPLES_PER_SEGMENT)
+        } else {
+            self.samples()
+                .skip(0)
+                .take(0)
+        }
     }
 
     pub fn sequence_stream(&self) -> watch::Receiver<TrackSequence> {
@@ -743,5 +767,20 @@ impl Store {
         } else {
             Some(TrackRef{ state, track_id })
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::VecDeque;
+    use crate::store::binary_search_by;
+
+    #[test]
+    fn binary_search() {
+        let mut v = VecDeque::with_capacity(3);
+        v.push_back(2);
+        v.push_back(3);
+        v.push_front(1);
+        assert_eq!(1, binary_search_by(&v, |item| item.cmp(&2) ).unwrap());
     }
 }
