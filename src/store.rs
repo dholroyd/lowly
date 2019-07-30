@@ -450,14 +450,15 @@ impl AacTrack {
         //  b) configured, not hardcoded
         const AUDIO_SAMPLES_PER_PART: usize = 15;
 
-
+        let sample_count = self.samples.len();
         Ok(self.segment_samples(dts)
             .enumerate()
-            .group_by(|(i, _)| i / AUDIO_SAMPLES_PER_PART )
+            .step(AUDIO_SAMPLES_PER_PART)
             .into_iter()
-            .map(|(key, group)| {  // TODO: can we avoid allocating for 'group'?
+            .map(move |(index, sample)| {
+                let key = index / AUDIO_SAMPLES_PER_PART;
                 // now, check that we have all the samples needed for a complete part
-                if group.len() == AUDIO_SAMPLES_PER_PART {
+                if sample_count - index >= AUDIO_SAMPLES_PER_PART {
                     Some(PartInfo {
                         part_id: key as u64,
                         duration: Some(0.32),  // TODO: don't hardcode
@@ -503,19 +504,19 @@ impl AacTrack {
         self.samples
             .iter()
             .enumerate()
-            .group_by(|(i, _)| i / Self::AAC_SAMPLES_PER_SEGMENT )
-            .into_iter()
-            .map(move |(key, group)| {  // TODO: can we avoid allocating for 'group'?
-                if group.len() == Self::AAC_SAMPLES_PER_SEGMENT {
+            .step(Self::AAC_SAMPLES_PER_SEGMENT )
+            .map(move |(index, sample)| {
+                let key = index / Self::AAC_SAMPLES_PER_SEGMENT;
+                if self.samples.len() - index >= Self::AAC_SAMPLES_PER_SEGMENT {
                     SegmentInfo {
-                        dts: group[0].1.dts,
+                        dts: sample.dts,
                         seq: key as u64 + seg_num as u64,
                         duration: Some(AAC_SEGMENT_DURATION),
                         continuous: true, // TODO check for timing gaps etc.
                     }
                 } else {
                     SegmentInfo {
-                        dts: group[0].1.dts,
+                        dts: sample.dts,
                         seq: key as u64 + seg_num as u64,
                         duration: None,
                         continuous: true, // TODO check for timing gaps etc.
